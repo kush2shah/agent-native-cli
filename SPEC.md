@@ -101,7 +101,7 @@ report ─approve reset→ reset → END
 
 Workers are a subgraph: `agent ⇄ run_cli` (hand-built ReAct; no prebuilt agent or `ToolNode`). There are no interrupts inside workers. Writes outside the approved contract are auto-denied and logged.
 
-**What the worker sees:** the task prompt, the CLI's root `--help`, and `TARGET_DOCS_PATH` if set. In the `docs` arm it also gets a `search_docs` tool over the docs snapshot (see Docs). Never the inventory. That gap is the experiment.
+**What the worker sees:** the task prompt, the CLI's root `--help`, and `TARGET_DOCS_PATH` if set. In the `docs` arm it also gets the live LangChain docs MCP's read tools (see Docs). Never the inventory. That gap is the experiment.
 
 ### Phases
 
@@ -161,8 +161,10 @@ Placeholders (`<name>`, `$VAR`, `...`) are never flagged as unknown commands.
 | Arm | Worker gets |
 |---|---|
 | `help` | root `--help` (plus `TARGET_DOCS_PATH` if set) |
-| `docs` | the above plus `search_docs(query)` over the snapshot; every query and result is logged |
+| `docs` | the above plus the live docs MCP (`https://docs.langchain.com/mcp`): `search_docs_by_lang_chain` and `query_docs_filesystem_docs_by_lang_chain` only. `submit_feedback` is never exposed (it writes to the docs team). Every call and result is logged in the transcript |
 | `skill` (later) | the above plus a skill loaded into the prompt |
+
+The `docs` arm uses the live MCP because that is what real agents are given; its semantic search also handles concept queries the snapshot's keyword search misses. The cost is reproducibility: the docs can change between runs. So every MCP call and its full result go in the transcript, the snapshot date is recorded next to it, and a task whose `docs` result changes between runs can be checked against what the MCP returned each time. The snapshot stays for the docs check, plan grounding, and `docs_refs` validation.
 
 The report compares arms per task. Fails in `help` but passes in `docs` → the CLI is hard to discover. Fails in both → a CLI or docs bug. Passes only with the skill → the skill is filling a docs gap.
 
@@ -280,7 +282,7 @@ Each milestone ends with something runnable. Stop after each one for review.
 - Done when: `python -m tester discover` writes `inventory.json`, and every command is classified with an unknown → denied default.
 
 **M1.5: Docs snapshot + check**
-- `python -m tester docs`: snapshot the docs, check every `langsmith …` example against the inventory, keyword search over the snapshot (reused by `propose` and the `docs` arm).
+- `python -m tester docs`: snapshot the docs, check every `langsmith …` example against the inventory, keyword search over the snapshot (reused by `propose`).
 - Done when: `docs_check.json` lists each finding with its page URL and line.
 
 **M2: Propose + review**
@@ -335,7 +337,7 @@ runs/                # gitignored; one folder per run
 ## Open questions
 
 - Which commands support metadata tags (for the manifest's second marker)
-- Whether the `docs` arm should search the live docs MCP instead of the snapshot (more realistic, less reproducible)
-- ~~Which docs file to give the agent~~ Root `--help` in every arm, plus `search_docs` over a snapshot in the `docs` arm.
+- ~~Live docs MCP vs snapshot for the `docs` arm~~ Live MCP (realistic); calls are logged for auditability. The snapshot is kept for the docs check and planning.
+- ~~Which docs file to give the agent~~ Root `--help` in every arm, plus the docs MCP in the `docs` arm.
 - ~~Exact CLI binary name and auth env var names~~ `langsmith`; see the config table.
 - ~~LLM vs rules classifier~~ Rules + human overrides decide; the LLM only suggests.
