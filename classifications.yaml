@@ -3,4 +3,27 @@
 # These beat the verb rules, but never beat the hard denylist in tester/classify.py.
 # `python -m tester discover` writes LLM suggestions for unknown commands to
 # runs/<id>/suggested_classifications.yaml. Copy over only the ones you agree with.
-{}
+#
+# `destructive` here means "never let a worker run it", which also covers side
+# effects outside the workspace, not just deletes.
+
+# Generated groups that also accept `[flags]`. Run bare, they print help; each
+# child is classified on its own.
+annotation-queues: read
+feedback: read
+projects insights: read
+public: read
+
+# Reads.
+online-evaluators spend: read      # per-day evaluator spend report
+prompt commits: read               # lists commits for a Prompt Hub repo
+hub init: read                     # scaffolds local files only; cwd is the sandbox temp dir
+
+# Writes (still need a task's write contract to run).
+annotation-queues populate: write  # adds experiment runs to a queue; can extend trace retention
+projects issues examples propose: write
+
+# Never run.
+apps dev: destructive              # long-running local server that opens a browser and proxies API calls
+apps init: destructive             # runs a dependency install (third-party code, network) as its last step
+prompt-webhooks test: destructive  # sends a payload to an external webhook URL
