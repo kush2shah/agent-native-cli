@@ -112,11 +112,11 @@ Workers are a subgraph: `agent ⇄ run_cli` (hand-built ReAct; no prebuilt agent
 | docs | Snapshots the docs site; checks every `langsmith …` example in it against the inventory (standalone: `python -m tester docs`) | `runs/_docs/<date>/`, `docs_check.json` |
 | propose | Generator prompt drafts a seed plan, 5 tasks with contracts, and a reset plan, grounded in the docs | `plan.yaml` |
 | review | Shows the plan; user approves, edits, or asks for changes (loops to propose) | approved `plan.yaml` |
-| seed | Harness executor creates seed objects, writing the manifest ahead of each create; waits until async-ingested objects (runs) are visible | `manifest.json` |
-| run | One Send per task × repeat; each runs the worker subgraph | per-run results in state |
+| seed | Materializes seed specs into exact data; after confirmation, the harness executor creates seed objects, writing the manifest ahead of each create, and waits until runs are visible | `seed_data.json`, `manifest.json`, `listing_before.json` |
+| run | One worker per task × arm × repeat (sequential in M3, Send in M4) | `workers/*.jsonl`, `commands.jsonl`, results in state |
 | grade | Four graders as parallel branches | scores in state |
 | report | Writes markdown, blind spots first; user can dispute a verdict | `report.md` |
-| reset | Harness executor deletes manifest entries in reverse order; verifies they're gone | updated manifest |
+| reset | Harness executor deletes manifest entries in reverse order; verifies they're gone and compares a fresh listing with the one before seeding | `reset.json`, `listing_after.json` |
 
 ### Classification
 
@@ -135,9 +135,27 @@ An optional LLM pass suggests classes for `unknown` commands. Suggestions are wr
 
 The model picks names, so `run_cli` can only record a create in the manifest beforehand if it knows which argument is the name. For the prototype:
 
-- Only create commands with a hand-written name-argument mapping (in code) may appear in `allowed_writes`, starting with `datasets create`.
-- `run_cli` enforces the `<run_id>-<task>-r<n>-` prefix on that argument, writes the `intended` manifest entry, runs, and parses the ID from JSON output.
-- Every worker run takes a listing snapshot before and after, so `no_objects_outside_manifest` has something to compare against.
+- Only create commands with a hand-written mapping in `tester/plan.py` (`CREATES`: name flag and object kind) may appear in `allowed_writes`. So far that's `datasets create` (`--name`).
+- Plans name task-created objects `<run_id>-x`. Each worker run gets its own prefix, `<run_id>-<task>-<arm>-r<n>-`, substituted into its prompt and checks, so arms and repeats never collide.
+- `run_cli` denies a create whose name lacks that prefix, writes the `intended` manifest entry, runs, and takes the ID from JSON output. With pretty output (or after an error) it asks the harness to look the object up by its exact name; a create that errored and left nothing is marked `failed`.
+- A create without a manifest is denied outright.
+- The whole run is checked with a workspace listing before seeding and after reset (see Seeding and reset). Per-worker listings are left for M4's `no_objects_outside_manifest` grader.
+
+### Seeding and reset (M3)
+
+**Harness executor** (`tester/harness.py`) uses the LangSmith SDK with explicit target credentials (`workspace_id=""` stops the SDK's env fallback). It creates only names starting with `<run_id>-`, writes each manifest entry before the create, and is idempotent across a resume. Projects get their runs posted synchronously as full trees (explicit start/end times, errors, child runs, dotted order), and seeding waits until every run is queryable.
+
+**Materialize.** Seed specs in the plan are prose. Before seeding, one structured model call per step turns each spec into exact data (examples, runs with latencies and errors, prompt messages), written to `seed_data.json`. Code checks the JSON payloads and warns when a hard-check value appears nowhere in the data.
+
+**Confirm seed (interrupt).** Shows what will be created and how many worker runs follow: go, edit `seed_data.json` (reloaded and rechecked), stop (nothing is created), or quit and resume later.
+
+**Run.** Workers run one at a time in M3. Each gets a fresh `CliRunner` (contract writes only, worker prefix, manifest, `MAX_CLI_CALLS_PER_TASK`), writes a full transcript to `workers/<task>-<arm>-r<n>.jsonl`, and logs every call to `commands.jsonl`. The plan's hard checks run right after each worker, before anything is deleted (a preview of M4's state grader). Trap tasks show "needs review" until M4 adds a judge.
+
+**Confirm reset (interrupt).** Shows results and every live manifest entry: reset, keep for inspection (`python -m tester reset <run_id>` later), or quit.
+
+**Reset** deletes live manifest entries in reverse order, verifies each is gone, then lists the workspace again and compares with the listing taken before seeding: objects of ours left behind, objects removed (should never happen), and objects others added meanwhile (shown, not a failure).
+
+**Budgets.** CLI calls per task (`MAX_CLI_CALLS_PER_TASK`), 10 docs calls per task, 30 model turns per worker, tool output capped at 40,000 characters for the model (full output in the transcript), and the process-level cost ceiling (`tester/budget.py`, list prices per model; checked before every model call and before each worker).
 
 ### Docs
 
@@ -170,7 +188,7 @@ The report compares arms per task. Fails in `help` but passes in `docs` → the 
 
 ### Concurrency
 
-Repeats of the same task run in parallel against one workspace. Every object name includes `<run_id>-<task>-r<n>`, and hard checks are scoped to their own prefix so one worker's writes can't pass or fail another's check.
+Repeats of the same task run in parallel against one workspace (M4). Every object a worker creates is named `<run_id>-<task>-<arm>-r<n>-…`, and hard checks are scoped to their own prefix so one worker's writes can't pass or fail another's check.
 
 ### State (sketch)
 
@@ -237,7 +255,7 @@ Flags are recorded so invented flags can be detected statically from the command
 
 Review actions: approve, revise with feedback (loops to `propose` with the previous plan, all feedback so far, and any errors), or edit `plan.yaml` by hand (reloaded and revalidated). `python -m tester plan --resume <run_id>` continues a paused run from `runs/checkpoints.sqlite`.
 
-**manifest.json:** a list of `{kind, name, id, status: intended|created|deleted, created_by_task}`. Deleting a tracing project removes its traces, so seeded runs are covered by their project's entry.
+**manifest.json:** a list of `{kind, name, id, status: intended|created|failed|deleted, created_by, seeded}`; `created_by` is `seed` or the worker label (`t02/help/r1`). Deleting a tracing project removes its traces, so seeded runs are covered by their project's entry.
 
 **commands.jsonl:** one line per `run_cli` call, allowed or denied: argv, resolved path, class, decision and reason, exit code, duration, output sizes and heads.
 
@@ -290,7 +308,7 @@ Each milestone ends with something runnable. Stop after each one for review.
 - Done when: you can generate a plan, request edits, approve, kill the process mid-review, and resume.
 
 **M3: Seed, run, reset (sequential)**
-- Manifest writer, harness executor, seed node (with wait-for-visible), worker subgraph (hand ReAct), name-arg mapping for allowed creates, reset, `help` and `docs` arms.
+- Manifest writer, harness executor, seed materialization + confirmation, seed node (with wait-for-visible), worker subgraph (hand ReAct), name mapping for allowed creates, reset with listing verification, `help` and `docs` arms. `python -m tester run [--plan plan.yaml] [--arms] [--repeats] [--tasks]` and `python -m tester reset <run_id>`.
 - Tasks run one at a time.
 - Done when: a full run leaves the workspace exactly as it started, verified by listing.
 
@@ -315,7 +333,7 @@ Each milestone ends with something runnable. Stop after each one for review.
 
 ```
 tester/
-  __main__.py        # CLI entry: discover | plan | run | reset
+  __main__.py        # CLI entry: discover | docs | config | plan | run | reset
   config.py          # .env loading, env mapping
   run_cli.py         # allowlisted subprocess tool + policy
   classify.py        # hard denylist, verb rules, overrides, LLM suggestions
@@ -324,6 +342,10 @@ tester/
   plan.py            # plan schema + validation (M2)
   graph.py           # top-level graph (M2)
   worker.py          # ReAct subgraph (M3)
+  harness.py         # harness executor: seed, reset, listings (M3)
+  seed.py            # seed materialization (M3)
+  docs_mcp.py        # live docs MCP client, read tools only (M3)
+  budget.py          # process-level cost meter (M3)
   graders.py         # (M4)
   manifest.py        # (M3)
   report.py          # (M4)
