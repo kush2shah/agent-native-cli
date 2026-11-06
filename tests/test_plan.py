@@ -88,7 +88,8 @@ class ScriptedPlanner:
 def start(cfg, inventory_data, tmp_path):
     snap = tmp_path / "snap"
     snapshot(snap, "https://docs.example/llms.txt", fetch=fake_fetch, workers=2)
-    return {"run_id": "r1", "inventory_path": str(cfg.runs_dir / "test" / "inventory.json"), "snapshot_dir": str(snap)}
+    return {"run_id": "r1", "inventory_path": str(cfg.runs_dir / "test" / "inventory.json"), "snapshot_dir": str(snap),
+            "plan_only": True}
 
 
 def interrupt_of(graph, config):

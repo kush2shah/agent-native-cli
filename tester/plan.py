@@ -7,19 +7,21 @@ real run ID when the plan runs (M3), so a plan can be reviewed before it has one
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import yaml
 from pydantic import BaseModel, Field
 
 from tester.classify import WRITE
-from tester.inventory import Inventory
+
+if TYPE_CHECKING:
+    from tester.inventory import Inventory
 
 RUN_PREFIX = "<run_id>-"
 
-# Creates a worker may run, with the argument that holds the object's name, so
-# run_cli can enforce the prefix and record the object in the manifest first (M3).
-NAME_ARG = {"datasets create": 0}  # first positional
+# Creates a worker may run: the flag that holds the object's name and the kind of
+# object, so run_cli can enforce the name prefix and write the manifest entry first.
+CREATES = {"datasets create": {"name_flag": "--name", "kind": "dataset"}}
 
 SEED_KINDS = ("dataset", "project_with_runs", "prompt")
 CHECK_METHODS = ("output_contains_all", "output_contains_any", "object_exists", "object_absent")
@@ -88,8 +90,8 @@ def validate_plan(plan: dict, inventory: Inventory, docs_urls: set[str] | None =
         where = f"task {t.id}"
         for path in t.allowed_writes:
             node = inventory.get(path)
-            if path not in NAME_ARG:
-                errors.append(f"{where}: allowed_writes {path!r} isn't supported (only {', '.join(sorted(NAME_ARG))})")
+            if path not in CREATES:
+                errors.append(f"{where}: allowed_writes {path!r} isn't supported (only {', '.join(sorted(CREATES))})")
             elif not node or node.get("class") != WRITE:
                 errors.append(f"{where}: allowed_writes {path!r} isn't a write command in the inventory")
         if m := _CLI_SYNTAX.search(t.prompt):
@@ -120,3 +122,35 @@ def dump_plan(plan: dict, meta: dict) -> str:
 
 def load_plan(text: str) -> dict:
     return yaml.safe_load(text) or {}
+
+
+# --- binding names to a run ------------------------------------------------------
+
+
+def worker_prefix(run_id: str, task_id: str, arm: str, repeat: int) -> str:
+    """Prefix for objects one worker run creates, so repeats and arms never collide."""
+    return f"{run_id}-{task_id}-{arm}-r{repeat}-"
+
+
+def bind(text: str, run_id: str, seeded: set[str], wprefix: str | None = None) -> str:
+    """Replace `<run_id>-x` with real names: seeded objects get the run prefix,
+    anything else (an object the task creates) gets the worker's prefix."""
+
+    def sub(m: re.Match) -> str:
+        ref = m.group(0)
+        rest = ref[len(RUN_PREFIX):]
+        if ref in seeded or wprefix is None:
+            return f"{run_id}-{rest}"
+        return f"{wprefix}{rest}"
+
+    return _NAME_REF.sub(sub, text)
+
+
+def name_from_args(path: str, args: list[str]) -> str | None:
+    flag = CREATES[path]["name_flag"]
+    for i, tok in enumerate(args):
+        if tok == flag and i + 1 < len(args):
+            return args[i + 1]
+        if tok.startswith(flag + "="):
+            return tok.split("=", 1)[1]
+    return None

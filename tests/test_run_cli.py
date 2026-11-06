@@ -5,6 +5,7 @@ import json
 import pytest
 
 from tester.inventory import Inventory, discover
+from tester.manifest import Manifest
 from tester.run_cli import CliRunner, decide
 
 from .conftest import TARGET_KEY
@@ -44,17 +45,51 @@ def test_unknown_verb_denied(inventory):
 
 
 def test_disallowed_write_is_denied_and_logged(runner):
-    res = runner.run(["datasets", "create", "ct-x"])
+    res = runner.run(["datasets", "create", "--name", "ct-x"])
     assert not res.allowed
     assert "allowed_writes" in res.decision.reason
     assert log_lines(runner)[-1]["reason"] == res.decision.reason
 
 
-def test_write_in_contract_runs(cfg, inventory):
-    with CliRunner(cfg, inventory=inventory, allowed_writes=("datasets create",)) as r:
-        res = r.run(["datasets", "create", "ct-x", "--format", "json"])
+def creator(cfg, inventory, tmp_path, **kw):
+    return CliRunner(cfg, inventory=inventory, allowed_writes=("datasets create",), name_prefix="ct1-t02-help-r1-",
+                     manifest=Manifest(tmp_path / "manifest.json"), label="t02/help/r1", **kw)
+
+
+def test_write_in_contract_runs_and_is_recorded_first(cfg, inventory, tmp_path):
+    with creator(cfg, inventory, tmp_path) as r:
+        res = r.run(["datasets", "create", "--name", "ct1-t02-help-r1-x", "--format", "json"])
     assert res.allowed and res.exit_code == 0
-    assert json.loads(res.stdout)["name"] == "ct-x"
+    assert json.loads(res.stdout)["name"] == "ct1-t02-help-r1-x"
+    [entry] = r.manifest.entries
+    assert entry | {"ts": 0} == {"kind": "dataset", "name": "ct1-t02-help-r1-x", "id": "d2", "status": "created",
+                                 "created_by": "t02/help/r1", "ts": 0}
+
+
+def test_create_without_json_output_looks_up_the_id(cfg, inventory, tmp_path):
+    with creator(cfg, inventory, tmp_path, lookup_id=lambda kind, name: "looked-up") as r:
+        res = r.run(["datasets", "create", "--name=ct1-t02-help-r1-x"])
+    assert res.exit_code == 0 and r.manifest.entries[0]["id"] == "looked-up"
+
+
+def test_failed_create_is_marked_failed(cfg, inventory, tmp_path, monkeypatch):
+    with creator(cfg, inventory, tmp_path, lookup_id=lambda kind, name: None) as r:
+        r.env["FAKE_CREATE_FAILS"] = "1"
+        res = r.run(["datasets", "create", "--name", "ct1-t02-help-r1-x"])
+    assert res.exit_code == 1 and r.manifest.entries[0]["status"] == "failed"
+
+
+def test_create_name_must_have_the_worker_prefix(cfg, inventory, tmp_path):
+    with creator(cfg, inventory, tmp_path) as r:
+        res = r.run(["datasets", "create", "--name", "ct1-other"])
+    assert not res.allowed and "must start with 'ct1-t02-help-r1-'" in res.decision.reason
+    assert r.manifest.entries == []
+
+
+def test_create_without_a_manifest_is_denied(cfg, inventory):
+    with CliRunner(cfg, inventory=inventory, allowed_writes=("datasets create",)) as r:
+        res = r.run(["datasets", "create", "--name", "x"])
+    assert not res.allowed and "manifest" in res.decision.reason
 
 
 def test_destructive_denied_even_if_listed_as_allowed_write(cfg, inventory):
@@ -133,8 +168,8 @@ def test_target_switching_flags_denied(runner, argv):
 @pytest.mark.parametrize(
     "argv",
     [
-        ["datasets", "create", "x", "--description", "@../.env"],
-        ["datasets", "create", "x", "--description=@secrets"],
+        ["datasets", "create", "--name", "x", "--description", "@../.env"],
+        ["datasets", "create", "--name", "x", "--description=@secrets"],
         ["api", "x", "-F", "key=@/etc/passwd"],
         ["datasets", "list", "-o", "/tmp/out.json"],
         ["datasets", "list", "--output=/tmp/out.json"],

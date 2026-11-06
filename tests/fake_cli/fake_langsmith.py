@@ -36,8 +36,9 @@ TREE = {
             "children": {
                 "list": {"summary": "List all datasets in the workspace", "run": "datasets_list", "flags": [LIMIT, OUTPUT]},
                 "get": {"summary": "Get dataset details by name or UUID", "args": ["NAME_OR_ID"], "run": "echo"},
-                "create": {"summary": "Create a new empty dataset", "args": ["NAME"], "run": "datasets_create",
-                           "flags": [(None, "description", "string", "Dataset description")]},
+                "create": {"summary": "Create a new empty dataset", "run": "datasets_create",
+                           "flags": [(None, "description", "string", "Optional description"),
+                                     (None, "name", "string", "Name for the new dataset (required)")]},
                 "delete": {"summary": "Delete a dataset by name or UUID", "args": ["NAME_OR_ID"], "run": "echo"},
             },
         },
@@ -182,6 +183,28 @@ def fmt_urfave_flag(f) -> str:
     return f"{head:<28}{desc}"
 
 
+def record_create(name: str) -> str:
+    """With a file:// endpoint, creates land in a JSON file the tests' fake SDK client shares."""
+    endpoint = os.environ.get("LANGSMITH_ENDPOINT", "")
+    if not endpoint.startswith("file://"):
+        return "d2"
+    path = endpoint[len("file://"):]
+    data = json.load(open(path)) if os.path.exists(path) else []
+    new_id = f"cli-{len(data) + 1}"
+    data.append({"id": new_id, "name": name})
+    json.dump(data, open(path, "w"))
+    return new_id
+
+
+def flag_value(argv: list[str], flag: str) -> str | None:
+    for i, tok in enumerate(argv):
+        if tok == flag and i + 1 < len(argv):
+            return argv[i + 1]
+        if tok.startswith(flag + "="):
+            return tok.split("=", 1)[1]
+    return None
+
+
 def main(argv: list[str]) -> int:
     if argv == ["--version"]:
         print("langsmith version 0.0.1-fake")
@@ -221,7 +244,18 @@ def main(argv: list[str]) -> int:
     if run == "datasets_list":
         print(json.dumps([{"id": "d1", "name": "fixture-dataset"}]))
     elif run == "datasets_create":
-        print(json.dumps({"id": "d2", "name": rest[0]}))
+        name = flag_value(argv, "--name")
+        if not name:
+            print('Error: required flag(s) "name" not set', file=sys.stderr)
+            return 1
+        if os.environ.get("FAKE_CREATE_FAILS"):
+            print("Error: 409 Conflict: dataset already exists", file=sys.stderr)
+            return 1
+        new_id = record_create(name)
+        if flag_value(argv, "--format") == "json":
+            print(json.dumps({"id": new_id, "name": name}))
+        else:
+            print(f"Created dataset {name}")
     elif run == "forbidden":
         print("Error: 403 Forbidden: this API key cannot access projects", file=sys.stderr)
         return 1

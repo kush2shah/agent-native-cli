@@ -58,3 +58,13 @@ def inventory_data(cfg, no_overrides) -> dict:
 @pytest.fixture
 def inventory(inventory_data) -> Inventory:
     return Inventory(inventory_data)
+
+
+@pytest.fixture(autouse=True)
+def no_harness_tracing():
+    """harness_env sets LANGSMITH_TRACING=true (to prove it never reaches the CLI);
+    don't let graph tests actually send traces with the fake key."""
+    import langsmith
+
+    with langsmith.tracing_context(enabled=False):
+        yield

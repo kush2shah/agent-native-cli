@@ -17,13 +17,15 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable
 
 from tester.classify import DESTRUCTIVE, READ, WRITE, hard_deny_reason
 from tester.config import Config, build_subprocess_env
+from tester.plan import CREATES, name_from_args
 
 if TYPE_CHECKING:
     from tester.inventory import Inventory
+    from tester.manifest import Manifest
 
 # Target-switching flags, plus --debug (can log request headers, i.e. the key).
 DENIED_FLAGS = {"--workspace", "--profile", "--api-url", "--api-key", "--base-url", "--debug"}
@@ -182,6 +184,12 @@ class CliRunner:
     log_path: Path | None = None
     max_calls: int | None = None
     label: str = ""
+    # Creates (rule 2): names must start with name_prefix, and each create is
+    # written to the manifest before it runs. lookup_id(kind, name) finds the new
+    # object's ID when the CLI's output doesn't include it.
+    name_prefix: str | None = None
+    manifest: Manifest | None = None
+    lookup_id: Callable[[str, str], str | None] | None = None
     calls: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
@@ -214,11 +222,48 @@ class CliRunner:
         else:
             decision = decide(args, self.inventory, self.allowed_writes)
 
+        create = None
+        if decision.allowed and not decision.is_help and decision.path in CREATES:
+            decision, create = self._check_create(decision, args)
+
         result = CliResult(argv=args, decision=decision)
         if decision.allowed:
+            entry = self.manifest.intend(create["kind"], create["name"], self.label) if create else None
             self._execute(result)
+            if entry is not None:
+                self._confirm_create(entry, result)
         self._log(result)
         return result
+
+    def _check_create(self, decision: Decision, args: list[str]) -> tuple[Decision, dict | None]:
+        path = decision.path
+        if self.manifest is None or not self.name_prefix:
+            return Decision(False, path, decision.cls, "creates need a manifest and a name prefix"), None
+        name = name_from_args(path, args)
+        if name is None:
+            return decision, None  # the CLI rejects a create without a name; nothing to record
+        if not name.startswith(self.name_prefix):
+            return Decision(False, path, decision.cls,
+                            f"names of objects you create must start with {self.name_prefix!r} (got {name!r})"), None
+        return decision, {"kind": CREATES[path]["kind"], "name": name}
+
+    def _confirm_create(self, entry: dict, result: CliResult) -> None:
+        from tester.manifest import CREATED, FAILED
+
+        new_id = None
+        if result.exit_code == 0:
+            try:
+                data = json.loads(result.stdout)
+                new_id = data.get("id") if isinstance(data, dict) else None
+            except ValueError:
+                pass
+        if not new_id and self.lookup_id:
+            new_id = self.lookup_id(entry["kind"], entry["name"])  # pretty output, or created despite an error
+        if new_id:
+            self.manifest.update(entry, id=str(new_id), status=CREATED)
+        elif result.exit_code not in (0, None) and self.lookup_id:
+            self.manifest.update(entry, status=FAILED, note=f"exit {result.exit_code}")
+        # exit 0 with no ID and no lookup: stays `intended`; reset looks it up by its exact name
 
     def _execute(self, result: CliResult) -> None:
         start = time.monotonic()
