@@ -135,6 +135,132 @@ def print_docs_summary(r: dict, out, limit: int) -> None:
             print(f"  ... {len(items) - limit} more in the JSON")
 
 
+# --- plan (M2) -----------------------------------------------------------------
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.types import Command
+
+    from tester.graph import Deps, build_graph
+
+    cfg = load_config()
+    for w in cfg.warnings:
+        print(f"WARNING: {w}", file=sys.stderr)
+    run_id = args.resume or args.run_id or new_run_id()
+    config = {"configurable": {"thread_id": run_id}, "recursion_limit": 40}
+    cfg.runs_dir.mkdir(parents=True, exist_ok=True)
+
+    with SqliteSaver.from_conn_string(str(cfg.runs_dir / "checkpoints.sqlite")) as saver:
+        graph = build_graph(Deps(cfg=cfg, model=make_model(cfg)), checkpointer=saver)
+        if args.resume:
+            if not graph.get_state(config).values:
+                print(f"no saved run {run_id!r}", file=sys.stderr)
+                return 1
+            print(f"resuming run {run_id}")
+        else:
+            inv_path = Path(args.inventory) if args.inventory else latest_inventory(cfg.runs_dir)
+            if not inv_path or not inv_path.exists():
+                print("no inventory found; run `python -m tester discover` first", file=sys.stderr)
+                return 1
+            start = {"run_id": run_id, "inventory_path": str(inv_path),
+                     "snapshot_dir": str(ensure_snapshot(cfg, snapshot_dir=args.snapshot))}
+            if args.defaults:
+                from tester.graph import INTAKE_QUESTIONS
+
+                start["intake"] = {q["key"]: q["default"] for q in INTAKE_QUESTIONS}
+            print(f"run {run_id}: inventory {inv_path}")
+            print("drafting a plan ...", flush=True)
+            graph.invoke(start, config)
+
+        while True:
+            state = graph.get_state(config)
+            if not state.interrupts:
+                break
+            payload = state.interrupts[0].value
+            answer = ask_intake(payload) if payload["type"] == "intake" else ask_review(payload)
+            if answer is None:
+                print(f"\npaused. resume with: python -m tester plan --resume {run_id}")
+                return 0
+            if answer.get("action") == "revise" or payload["type"] == "intake":
+                print("drafting a plan ...", flush=True)
+            graph.invoke(Command(resume=answer), config)
+
+        final = graph.get_state(config).values
+        if final.get("approved"):
+            print(f"\napproved: {cfg.runs_dir / run_id / 'plan.yaml'} (revision {final.get('revision')})")
+        return 0
+
+
+def make_model(cfg):
+    from langchain.chat_models import init_chat_model
+
+    if not cfg.model:
+        raise ConfigError("MODEL is not set")
+    return init_chat_model(cfg.model)
+
+
+def ask_intake(payload: dict) -> dict | None:
+    print("\nA few questions to shape the plan (Enter keeps the default, q to pause):")
+    answers = {}
+    for q in payload["questions"]:
+        default = f" [{q['default']}]" if q["default"] else ""
+        reply = input(f"\n{q['question']}{default}\n> ").strip()
+        if reply == "q":
+            return None
+        answers[q["key"]] = reply or q["default"]
+    return answers
+
+
+def print_plan(payload: dict) -> None:
+    plan = payload["plan"]
+    print(f"\n=== plan, revision {payload['revision']}: {payload['plan_path']}")
+    print(plan.get("summary", ""))
+    if plan.get("seed"):
+        print("\nseed:")
+        for s in plan["seed"]:
+            print(f"  {s['id']} {s['kind']:<18} {s['name']}")
+            print(f"      {s['spec'][:200]}")
+    print("\ntasks:")
+    for t in plan.get("tasks", []):
+        writes = f"  writes: {', '.join(t['allowed_writes'])}" if t.get("allowed_writes") else ""
+        print(f"  {t['id']} [{t['tier']}, expect {t['expected']}]{writes}")
+        print(f"      {t['prompt']}")
+        print(f"      why: {t.get('rationale', '')}")
+        for c in t.get("hard_checks", []):
+            print(f"      check: {c['method']} {c.get('values')}  ({c['describe']})")
+        for ref in t.get("docs_refs", []):
+            print(f"      docs: {ref}")
+    if payload["errors"]:
+        print(f"\nERRORS ({len(payload['errors'])}), fix before approving:")
+        for e in payload["errors"]:
+            print(f"  - {e}")
+    if payload.get("notice"):
+        print(f"\nnote: {payload['notice']}")
+
+
+def ask_review(payload: dict) -> dict | None:
+    import os
+    import subprocess
+
+    print_plan(payload)
+    while True:
+        choice = input("\n[a]pprove  [r]evise with feedback  [e]dit plan.yaml  [q]uit (resume later)\n> ").strip().lower()
+        if choice in ("a", "approve"):
+            return {"action": "approve"}
+        if choice in ("r", "revise"):
+            feedback = input("what should change?\n> ").strip()
+            if feedback:
+                return {"action": "revise", "feedback": feedback}
+        elif choice in ("e", "edit"):
+            subprocess.call([os.environ.get("EDITOR", "vi"), payload["plan_path"]])
+            return {"action": "edited"}
+        elif choice in ("q", "quit"):
+            return None
+
+
 KNOWN_VARS = [
     "TARGET_CLI_BIN", "TARGET_API_KEY", "TARGET_ENDPOINT", "TARGET_WORKSPACE_ID", "TARGET_DOCS_PATH", "DOCS_INDEX_URL",
     "LANGSMITH_API_KEY", "LANGSMITH_PROJECT", "LANGSMITH_TRACING", "MODEL", "ANTHROPIC_API_KEY",
@@ -201,7 +327,13 @@ def main(argv: list[str] | None = None) -> int:
     dc.set_defaults(func=cmd_docs)
 
     sub.add_parser("config", help="show which settings are set (never prints values)").set_defaults(func=cmd_config)
-    sub.add_parser("plan", help="(M2)").set_defaults(func=not_yet("M2"))
+    pl = sub.add_parser("plan", help="intake → propose → review a test plan (resumable)")
+    pl.add_argument("--run-id", help="use this run ID for a new run")
+    pl.add_argument("--resume", metavar="RUN_ID", help="continue a paused run")
+    pl.add_argument("--inventory", help="inventory.json to plan against (default: newest run)")
+    pl.add_argument("--snapshot", help="docs snapshot dir (default: today's)")
+    pl.add_argument("--defaults", action="store_true", help="skip intake questions and use the defaults")
+    pl.set_defaults(func=cmd_plan)
     sub.add_parser("run", help="(M3)").set_defaults(func=not_yet("M3"))
     sub.add_parser("reset", help="(M3)").set_defaults(func=not_yet("M3"))
 

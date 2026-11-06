@@ -226,6 +226,15 @@ Flags are recorded so invented flags can be detected statically from the command
   soft_metrics: [cli_calls, help_calls, invented_flags, invented_subcommands, used_json_format, output_tokens, error_recoveries]
 ```
 
+**Plan validation** (`tester/plan.py`, in code; errors block approval and are sent back to `propose`, up to 2 automatic retries before the reviewer sees them):
+- 3–8 tasks, unique IDs; seed names start with `<run_id>-`; seed kinds `dataset`, `project_with_runs`, `prompt`
+- `allowed_writes` only lists commands with a name-arg mapping that the inventory classifies as `write`
+- prompts contain no CLI syntax, and every `<run_id>-` name they mention is seeded (or the task may create it)
+- `complete` tasks have hard checks; `object_*` checks only look at `<run_id>-` objects
+- every `docs_refs` URL is a page in the snapshot
+
+Review actions: approve, revise with feedback (loops to `propose` with the previous plan, all feedback so far, and any errors), or edit `plan.yaml` by hand (reloaded and revalidated). `python -m tester plan --resume <run_id>` continues a paused run from `runs/checkpoints.sqlite`.
+
 **manifest.json:** a list of `{kind, name, id, status: intended|created|deleted, created_by_task}`. Deleting a tracing project removes its traces, so seeded runs are covered by their project's entry.
 
 **commands.jsonl:** one line per `run_cli` call, allowed or denied: argv, resolved path, class, decision and reason, exit code, duration, output sizes and heads.
