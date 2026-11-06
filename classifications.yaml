@@ -1,0 +1,6 @@
+# Human-reviewed command classifications: `<command path>: read | write | destructive`.
+#
+# These beat the verb rules, but never beat the hard denylist in tester/classify.py.
+# `python -m tester discover` writes LLM suggestions for unknown commands to
+# runs/<id>/suggested_classifications.yaml. Copy over only the ones you agree with.
+{}

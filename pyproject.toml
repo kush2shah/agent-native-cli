@@ -1,0 +1,21 @@
+[project]
+name = "cli-tester"
+version = "0.1.0"
+description = "Prototype: an agent that learns a CLI, tests realistic flows, and reports where the CLI is hard for agents."
+requires-python = ">=3.11"
+dependencies = [
+    "python-dotenv>=1.0",
+    "pyyaml>=6.0",
+    "pydantic>=2.7",
+    "langchain>=1.0",
+    "langchain-anthropic>=1.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.uv]
+package = false
