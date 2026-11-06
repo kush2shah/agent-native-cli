@@ -92,7 +92,11 @@ def parse_help(text: str) -> dict:
 
     required_args: list[str] = []
     for u in usage[:1]:
-        required_args = [t for t in u.split() if _PLACEHOLDER.match(t)]
+        toks = u.split()
+        # `--path <path>` is a flag value, not a positional
+        required_args = [
+            t for i, t in enumerate(toks) if _PLACEHOLDER.match(t) and not (i and toks[i - 1].startswith("-"))
+        ]
 
     return {
         "format": fmt,

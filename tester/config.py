@@ -17,6 +17,7 @@ from dotenv import dotenv_values
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_FILE = REPO_ROOT / ".env"
+DEFAULT_DOCS_INDEX = "https://docs.langchain.com/llms.txt"
 
 # TARGET_* name in the dotenv file -> env var name the LangSmith CLI reads.
 TARGET_ENV_MAP = {
@@ -43,6 +44,7 @@ class Config:
     cli_timeout_s: float
     runs_dir: Path
     warnings: tuple[str, ...] = ()
+    docs_index_url: str = DEFAULT_DOCS_INDEX
 
     @property
     def has_target_key(self) -> bool:
@@ -71,7 +73,7 @@ def load_config(env_file: Path | None = DEFAULT_ENV_FILE, runs_dir: Path | None 
     harness_key = os.environ.get("LANGSMITH_API_KEY")
     if harness_key and harness_key == target_env.get("LANGSMITH_API_KEY"):
         warnings.append(
-            "TARGET_API_KEY equals the harness LANGSMITH_API_KEY (safety rule 5 relaxed). "
+            "TARGET_API_KEY equals the harness LANGSMITH_API_KEY (safety rule 5). "
             "If tracing is on, harness traces land in the workspace the agent tests, so it isn't empty."
         )
 
@@ -88,6 +90,7 @@ def load_config(env_file: Path | None = DEFAULT_ENV_FILE, runs_dir: Path | None 
         cli_timeout_s=float(get("CLI_TIMEOUT_S", "60")),
         runs_dir=runs_dir or REPO_ROOT / "runs",
         warnings=tuple(warnings),
+        docs_index_url=get("DOCS_INDEX_URL", DEFAULT_DOCS_INDEX),
     )
 
 

@@ -30,7 +30,7 @@ def test_shared_target_and_harness_key_warns(fake_bin, monkeypatch):
     monkeypatch.setenv("LANGSMITH_API_KEY", "same")
     monkeypatch.setenv("TARGET_API_KEY", "same")
     cfg = load_config(env_file=None)
-    assert any("rule 5 relaxed" in w for w in cfg.warnings)
+    assert any("rule 5" in w for w in cfg.warnings)
 
 
 def test_missing_binary(monkeypatch):

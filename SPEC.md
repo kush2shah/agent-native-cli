@@ -8,6 +8,7 @@ This is a prototype, not a product. Favor simple and readable over general. Buil
 
 - Find out where the LangSmith CLI is hard for an agent to use: invented flags and subcommands, excessive `--help` lookups, unparseable or oversized output, unclear errors.
 - Make blind spots (commands the key can't run) loud, never silent.
+- Tell apart what the CLI fails to communicate and what the docs fail to communicate, so each failure points at the team that can fix it.
 - Learn LangGraph by building it: hand-built ReAct loop (cycles), Send API (map-reduce), parallel branches, interrupts with human edits.
 
 ## Non-goals (for now)
@@ -15,14 +16,14 @@ This is a prototype, not a product. Favor simple and readable over general. Buil
 - Supporting any CLI other than the one configured
 - A UI (terminal only)
 - LangSmith Engine integration
-- Variant comparisons (models, docs on/off)
+- Model comparisons (knowledge comparisons are in scope; see Docs)
 - Handling CLI version changes
 
 ## Hard safety rules
 
 These are enforced in code, never left to the model's judgment.
 
-1. **One target workspace.** The prototype operates only in a dedicated, initially empty workspace, using a key scoped to that workspace.
+1. **One target workspace.** The prototype operates only in one workspace, using a key scoped to that workspace (as of M1: a service token with access to one workspace). The workspace is not empty, so tasks and checks must never assume it is: hard checks are scoped to the run's name prefix, and listings are compared before and after.
 2. **Manifest-only deletes.** Every object the tester creates gets the run ID as a name prefix plus a metadata tag where supported. It is recorded in `runs/<run_id>/manifest.json` before creation and confirmed after. Reset deletes only manifest entries. Never delete by search, name pattern, or "delete all".
 3. **Allowlist execution.** The agent's tool, `run_cli`, enforces all of the following:
    - It executes only the configured CLI binary (resolved to an absolute path), via `subprocess` with an argument list. No shell, pipes, redirects, or other programs.
@@ -41,7 +42,7 @@ These are enforced in code, never left to the model's judgment.
    - An unknown subcommand under a group is denied, not passed through. The inventory may be incomplete, and "anything under this group runs" is not a safe fallback. The real CLI would print help and exit 0; graders count these denials as invented subcommands.
    - Every call runs with `cwd` set to a temp directory, `stdin` closed, and a timeout (default 60s; the whole process group is killed on expiry).
 4. **Minimal subprocess env.** The CLI subprocess gets an explicitly built env: `PATH` (CLI dir + `/usr/bin:/bin`), a temp `HOME`, and the target credentials only. It never inherits the harness environment. This matters doubly here because the CLI reads the same variable names the harness uses for tracing (`LANGSMITH_API_KEY`, `LANGSMITH_ENDPOINT`, `LANGSMITH_PROJECT`, `LANGSMITH_WORKSPACE_ID`). Target values are never written to the harness's `os.environ`.
-5. **Separate harness tracing.** Harness tracing credentials should be distinct from target credentials, with harness traces in a separate project and workspace. Relaxed for now: the same key is allowed with a loud warning. Revisit before M3, since harness traces in the target workspace break "initially empty" and are visible to the agent.
+5. **Separate harness tracing.** Harness tracing credentials are distinct from target credentials, with harness traces in a separate project and workspace. Satisfied as of M1. If the keys are ever equal, config warns loudly instead of refusing, because harness traces would then be visible to the agent.
 6. **Budget stops.** Max CLI calls per task (default 15, enforced in `run_cli`), a recursion limit as a backstop, and a cost ceiling (default $5) enforced by a thread-safe process-level counter, not graph state, so parallel workers can't all overshoot before a state merge.
 7. **Separate harness executor.** Seeding and reset need commands the agent must never get (`projects delete`, `runs create`). They run through a harness-side executor that only acts on the plan's seed steps and manifest entries. The worker's `run_cli` never has those permissions.
 
@@ -55,7 +56,8 @@ TARGET_CLI_BIN=langsmith
 TARGET_API_KEY=...                 # workspace-scoped key for the sandbox workspace
 TARGET_ENDPOINT=                   # optional; self-hosted only
 TARGET_WORKSPACE_ID=               # optional; needed if the key spans workspaces
-TARGET_DOCS_PATH=./target_docs/README.md   # README / AGENTS file the agent may read
+TARGET_DOCS_PATH=./target_docs/README.md   # optional local README / AGENTS file, given in every arm
+DOCS_INDEX_URL=https://docs.langchain.com/llms.txt   # optional; docs site index to snapshot
 
 # Harness: tracing for this project (separate workspace/project)
 LANGSMITH_API_KEY=...
@@ -99,7 +101,7 @@ report ─approve reset→ reset → END
 
 Workers are a subgraph: `agent ⇄ run_cli` (hand-built ReAct; no prebuilt agent or `ToolNode`). There are no interrupts inside workers. Writes outside the approved contract are auto-denied and logged.
 
-**What the worker sees:** the task prompt, the docs file, and the CLI's root `--help`. Never the inventory. That gap is the experiment.
+**What the worker sees:** the task prompt, the CLI's root `--help`, and `TARGET_DOCS_PATH` if set. In the `docs` arm it also gets a `search_docs` tool over the docs snapshot (see Docs). Never the inventory. That gap is the experiment.
 
 ### Phases
 
@@ -107,7 +109,8 @@ Workers are a subgraph: `agent ⇄ run_cli` (hand-built ReAct; no prebuilt agent
 |---|---|---|
 | intake | Asks 3–4 terminal questions: flows that matter, what "good" means, risk tolerance | `runs/<id>/intake.json` |
 | discover | Crawls `--help` recursively, classifies commands, probes permissions with cheap read calls | `runs/<id>/inventory.json` |
-| propose | Generator prompt drafts a seed plan, 5 tasks with contracts, and a reset plan | `plan.yaml` |
+| docs | Snapshots the docs site; checks every `langsmith …` example in it against the inventory (standalone: `python -m tester docs`) | `runs/_docs/<date>/`, `docs_check.json` |
+| propose | Generator prompt drafts a seed plan, 5 tasks with contracts, and a reset plan, grounded in the docs | `plan.yaml` |
 | review | Shows the plan; user approves, edits, or asks for changes (loops to propose) | approved `plan.yaml` |
 | seed | Harness executor creates seed objects, writing the manifest ahead of each create; waits until async-ingested objects (runs) are visible | `manifest.json` |
 | run | One Send per task × repeat; each runs the worker subgraph | per-run results in state |
@@ -136,6 +139,33 @@ The model picks names, so `run_cli` can only record a create in the manifest bef
 - `run_cli` enforces the `<run_id>-<task>-r<n>-` prefix on that argument, writes the `intended` manifest entry, runs, and parses the ID from JSON output.
 - Every worker run takes a listing snapshot before and after, so `no_objects_outside_manifest` has something to compare against.
 
+### Docs
+
+Agents fail on concepts as often as on syntax (which resources belong to an "agent", what an "environment" is). Help text can't show how resources relate, so the docs are an input to test, not just background.
+
+**Snapshot.** `tester/docs.py` follows the Mintlify `llms.txt` indexes recursively and saves every `/langsmith/` page as markdown under `runs/_docs/<date>/`, with an `index.json` (url, title, description, file). The 596 REST API reference pages are skipped. A run records which snapshot it used, so results don't drift when the live docs change.
+
+**Docs check (static, no CLI calls).** Every `langsmith …` command in a code block or inline code span is parsed with `shlex` and resolved against the inventory with the same resolver `run_cli` uses. Findings:
+- `unknown_command`: a positional at a group that isn't a subcommand
+- `unknown_flag`: a flag the command's help doesn't list
+- `hidden_flag`: works but isn't in any help (`--api-key`)
+- `missing_args`: fewer positionals than the usage line requires
+- `unparseable`: shlex can't split it
+
+Placeholders (`<name>`, `$VAR`, `...`) are never flagged as unknown commands.
+
+**Planner.** `propose` gets the titles and descriptions of all snapshot pages plus the top-matching page sections for the intake's flows. It writes tasks as goals in the product's own terms ("set up an eval for my agent's staging environment"), not command names, and cites the pages each task relies on in `docs_refs`.
+
+**Knowledge arms (M3–M4).** Each task × repeat runs once per arm:
+
+| Arm | Worker gets |
+|---|---|
+| `help` | root `--help` (plus `TARGET_DOCS_PATH` if set) |
+| `docs` | the above plus `search_docs(query)` over the snapshot; every query and result is logged |
+| `skill` (later) | the above plus a skill loaded into the prompt |
+
+The report compares arms per task. Fails in `help` but passes in `docs` → the CLI is hard to discover. Fails in both → a CLI or docs bug. Passes only with the skill → the skill is filling a docs gap.
+
 ### Concurrency
 
 Repeats of the same task run in parallel against one workspace. Every object name includes `<run_id>-<task>-r<n>`, and hard checks are scoped to their own prefix so one worker's writes can't pass or fail another's check.
@@ -156,7 +186,7 @@ class RunState(TypedDict):
     cost_usd: Annotated[float, operator.add]       # reporting only; enforcement is process-level
 ```
 
-Worker input (via Send): `{task, contract, repeat, run_id}`.
+Worker input (via Send): `{task, contract, repeat, arm, run_id}`.
 
 ## File formats
 
@@ -187,6 +217,7 @@ Flags are recorded so invented flags can be detected statically from the command
   prompt: "Find the runs that errored in project <run_id>-proj-a and summarize the error types."
   allowed_writes: []      # command paths this task may run (must have a name-arg mapping)
   expected: complete      # complete | ask_or_refuse | blind_spot
+  docs_refs: ["https://docs.langchain.com/langsmith/..."]   # pages the task's concepts come from
   hard_checks:            # programmatic; query state after the run
     - describe: "summary mentions each seeded error type"
       method: output_contains_all
@@ -209,6 +240,8 @@ These shape the parser and graders, and several are report findings already:
 - **A wrong key or wrong region gets 403, not 401.** Discover warns when every probe is refused instead of reporting everything as a blind spot.
 - **`--api-key` is a hidden flag.** The "not authenticated" error tells you to pass it, but no help output lists it.
 - **`datasets list` help says "default 100"**, but the request it sends uses `limit=20`.
+- **Three phrasings for missing input:** `required flag(s) "dataset" not set`, `Required flags "queue-id, status" not set`, and `--project or --project-id is required`.
+- **`workspaces list` has no `--limit`.** With 55 workspaces it returned 184 KB of JSON, about 3.3 KB each, mostly permission arrays.
 - 275 commands (221 runnable, 54 groups). Cobra pads command names to the longest plus one space, so a two-space parser silently misses `annotation-queues` and `online-evaluators`.
 
 ## Graders (run as parallel branches)
@@ -224,9 +257,10 @@ These shape the parser and graders, and several are report findings already:
 ## Report (`report.md`)
 
 1. **Not tested:** blind spots, plus inventory commands never exercised, with reasons
-2. **Scorecard:** per task, passes out of `REPEATS`, plus soft metrics
-3. **Findings:** each failure pattern mapped to a concrete CLI change it suggests
-4. **Caveat:** generator and tester share a model; flag if results look suspiciously clean
+2. **Scorecard:** per task and arm, passes out of `REPEATS`, plus soft metrics
+3. **Arm comparison:** per task, which arms passed, and what that says about the CLI vs the docs
+4. **Findings:** each failure pattern mapped to a concrete CLI or docs change it suggests, including docs check results
+5. **Caveat:** generator and tester share a model; flag if results look suspiciously clean
 
 ## Milestones
 
@@ -236,17 +270,21 @@ Each milestone ends with something runnable. Stop after each one for review.
 - `run_cli` with allowlist + argument checks + minimal env, help crawler, rule classifier with overrides, optional LLM suggestions, permission probe.
 - Done when: `python -m tester discover` writes `inventory.json`, and every command is classified with an unknown → denied default.
 
+**M1.5: Docs snapshot + check**
+- `python -m tester docs`: snapshot the docs, check every `langsmith …` example against the inventory, keyword search over the snapshot (reused by `propose` and the `docs` arm).
+- Done when: `docs_check.json` lists each finding with its page URL and line.
+
 **M2: Propose + review**
-- intake, propose, and review nodes; the terminal interrupt loop; SQLite checkpointer.
+- intake, propose, and review nodes; the terminal interrupt loop; SQLite checkpointer. `propose` is grounded in the docs snapshot; plans are validated in code before review.
 - Done when: you can generate a plan, request edits, approve, kill the process mid-review, and resume.
 
 **M3: Seed, run, reset (sequential)**
-- Manifest writer, harness executor, seed node (with wait-for-visible), worker subgraph (hand ReAct), name-arg mapping for allowed creates, reset.
+- Manifest writer, harness executor, seed node (with wait-for-visible), worker subgraph (hand ReAct), name-arg mapping for allowed creates, reset, `help` and `docs` arms.
 - Tasks run one at a time.
 - Done when: a full run leaves the workspace exactly as it started, verified by listing.
 
 **M4: Fan out + grade + report**
-- Replace the sequential loop with Send; add parallel graders, the report, and dispute → regrade.
+- Replace the sequential loop with Send; add parallel graders, the report (with the arm comparison), and dispute → regrade.
 - Done when: `report.md` shows blind spots first and repeats ran concurrently (visible as shared step numbers in traces).
 
 ## Testing
@@ -271,6 +309,8 @@ tester/
   run_cli.py         # allowlisted subprocess tool + policy
   classify.py        # hard denylist, verb rules, overrides, LLM suggestions
   inventory.py       # help crawl, parse, probe
+  docs.py            # docs snapshot, docs check, keyword search (M1.5)
+  plan.py            # plan schema + validation (M2)
   graph.py           # top-level graph (M2)
   worker.py          # ReAct subgraph (M3)
   graders.py         # (M4)
@@ -286,6 +326,7 @@ runs/                # gitignored; one folder per run
 ## Open questions
 
 - Which commands support metadata tags (for the manifest's second marker)
-- Which docs file to give the agent. Default: the CLI's root `--help` (already written for agents) plus the README.
+- Whether the `docs` arm should search the live docs MCP instead of the snapshot (more realistic, less reproducible)
+- ~~Which docs file to give the agent~~ Root `--help` in every arm, plus `search_docs` over a snapshot in the `docs` arm.
 - ~~Exact CLI binary name and auth env var names~~ `langsmith`; see the config table.
 - ~~LLM vs rules classifier~~ Rules + human overrides decide; the LLM only suggests.

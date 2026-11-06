@@ -1,4 +1,4 @@
-"""CLI entry: python -m tester discover | plan | run | reset"""
+"""CLI entry: python -m tester discover | docs | plan | run | reset"""
 
 from __future__ import annotations
 
@@ -70,8 +70,73 @@ def print_summary(data: dict, run_dir) -> None:
         print(f"note: {note}")
 
 
+def latest_inventory(runs_dir) -> "Path | None":
+    found = sorted(runs_dir.glob("*/inventory.json"), key=lambda p: p.stat().st_mtime)
+    return found[-1] if found else None
+
+
+def ensure_snapshot(cfg, refresh: bool = False, snapshot_dir=None):
+    """Today's docs snapshot, fetched once per day unless --refresh."""
+    from pathlib import Path
+
+    from tester.docs import snapshot
+
+    snap = Path(snapshot_dir) if snapshot_dir else cfg.runs_dir / "_docs" / time.strftime("%Y-%m-%d")
+    if refresh or not (snap / "index.json").exists():
+        print(f"snapshotting docs from {cfg.docs_index_url} ...", flush=True)
+        data = snapshot(snap, cfg.docs_index_url)
+        print(f"  {len(data['pages'])} pages from {data['indexes']} indexes"
+              + (f", {len(data['errors'])} fetch errors" if data["errors"] else ""))
+    return snap
+
+
+def cmd_docs(args: argparse.Namespace) -> int:
+    import json
+    from pathlib import Path
+
+    from tester.docs import check_docs
+    from tester.inventory import Inventory
+
+    cfg = load_config()
+    inv_path = Path(args.inventory) if args.inventory else latest_inventory(cfg.runs_dir)
+    if not inv_path or not inv_path.exists():
+        print("no inventory found; run `python -m tester discover` first", file=sys.stderr)
+        return 1
+    snap = ensure_snapshot(cfg, args.refresh, args.snapshot)
+    result = check_docs(snap, Inventory.load(inv_path))
+    result["inventory"] = str(inv_path)
+    run_id = args.run_id or new_run_id()
+    out = cfg.runs_dir / run_id / "docs_check.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(result, indent=2))
+    print_docs_summary(result, out, args.limit)
+    return 0
+
+
+def print_docs_summary(r: dict, out, limit: int) -> None:
+    print(f"\ndocs check: {out}")
+    print(f"snapshot {r['fetched_at']} · {r['pages']} pages, {r['pages_with_commands']} with CLI examples · "
+          f"{r['commands']} distinct commands, {r['commands_with_issues']} with issues")
+    print(f"inventory {r['inventory']} ({r['cli_version']})")
+    print(f"runnable commands that appear in the docs: {r['runnable_documented']} of {r['runnable_total']}")
+    if r["issue_counts"]:
+        print("issues: " + " · ".join(f"{k} {v}" for k, v in r["issue_counts"].items()))
+    by_kind: dict[str, list] = {}
+    for res in r["results"]:
+        for issue in res["issues"]:
+            by_kind.setdefault(issue["kind"], []).append((res, issue))
+    for kind, items in by_kind.items():
+        print(f"\n{kind} ({len(items)}):")
+        for res, issue in items[:limit]:
+            print(f"  {issue['detail']}")
+            print(f"    {res['text'][:120]}")
+            print(f"    {res['url']}:{res['line']}")
+        if len(items) > limit:
+            print(f"  ... {len(items) - limit} more in the JSON")
+
+
 KNOWN_VARS = [
-    "TARGET_CLI_BIN", "TARGET_API_KEY", "TARGET_ENDPOINT", "TARGET_WORKSPACE_ID", "TARGET_DOCS_PATH",
+    "TARGET_CLI_BIN", "TARGET_API_KEY", "TARGET_ENDPOINT", "TARGET_WORKSPACE_ID", "TARGET_DOCS_PATH", "DOCS_INDEX_URL",
     "LANGSMITH_API_KEY", "LANGSMITH_PROJECT", "LANGSMITH_TRACING", "MODEL", "ANTHROPIC_API_KEY",
 ]
 
@@ -126,6 +191,14 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--no-llm", action="store_true", help="skip LLM suggestions for unknown commands")
     d.add_argument("--no-probe", action="store_true", help="skip permission probes")
     d.set_defaults(func=cmd_discover)
+
+    dc = sub.add_parser("docs", help="snapshot the docs and check their CLI examples against the inventory")
+    dc.add_argument("--run-id", help="reuse a run ID instead of generating one")
+    dc.add_argument("--inventory", help="inventory.json to check against (default: newest run)")
+    dc.add_argument("--snapshot", help="use this snapshot dir instead of today's")
+    dc.add_argument("--refresh", action="store_true", help="re-fetch the docs even if today's snapshot exists")
+    dc.add_argument("--limit", type=int, default=15, help="examples to print per issue kind")
+    dc.set_defaults(func=cmd_docs)
 
     sub.add_parser("config", help="show which settings are set (never prints values)").set_defaults(func=cmd_config)
     sub.add_parser("plan", help="(M2)").set_defaults(func=not_yet("M2"))
