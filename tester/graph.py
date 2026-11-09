@@ -414,6 +414,8 @@ def build_graph(deps: Deps, checkpointer=None):
         action = (decision or {}).get("action")
         if action in ("reset", "keep"):
             return {"next": action}
+        if action == "retry_seed" and state.get("seed_error"):
+            return {"next": "seed"}  # seeding is idempotent: finished objects are skipped
         return {"next": "confirm_reset"}
 
     def reset(state: PlanState) -> PlanState:
@@ -445,8 +447,9 @@ def build_graph(deps: Deps, checkpointer=None):
                             ["seed", "confirm_seed", END])
     g.add_conditional_edges("seed", after_seed, ["run_next", "confirm_reset"])
     g.add_conditional_edges("run_next", after_run, ["run_next", "confirm_reset"])
-    g.add_conditional_edges("confirm_reset", lambda s: {"reset": "reset", "keep": END}.get(s["next"], "confirm_reset"),
-                            ["reset", "confirm_reset", END])
+    g.add_conditional_edges("confirm_reset",
+                            lambda s: {"reset": "reset", "keep": END, "seed": "seed"}.get(s["next"], "confirm_reset"),
+                            ["reset", "confirm_reset", "seed", END])
     g.add_edge("reset", END)
     return g.compile(checkpointer=checkpointer)
 

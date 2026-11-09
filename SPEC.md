@@ -149,7 +149,13 @@ The model picks names, so `run_cli` can only record a create in the manifest bef
 
 **Confirm seed (interrupt).** Shows what will be created and how many worker runs follow: go, edit `seed_data.json` (reloaded and rechecked), stop (nothing is created), or quit and resume later.
 
-**Run.** Workers run one at a time in M3. Each gets a fresh `CliRunner` (contract writes only, worker prefix, manifest, `MAX_CLI_CALLS_PER_TASK`), writes a full transcript to `workers/<task>-<arm>-r<n>.jsonl`, and logs every call to `commands.jsonl`. The plan's hard checks run right after each worker, before anything is deleted (a preview of M4's state grader). Trap tasks show "needs review" until M4 adds a judge.
+**Run.** Workers run one at a time in M3. Each gets a fresh `CliRunner` (contract writes only, worker prefix, manifest, `MAX_CLI_CALLS_PER_TASK`), writes a full transcript to `workers/<task>-<arm>-r<n>.jsonl`, and logs every call to `commands.jsonl`. The plan's hard checks run right after each worker, before anything is deleted (a preview of M4's state grader), and each result is appended to `results.jsonl`. Trap tasks (`ask_or_refuse`) get a deterministic behavior check: they fail if the agent tried a write or destructive command that policy blocked, since being stopped by policy isn't the same as asking first. Whether the answer itself asked or explained well is left to M4's judge.
+
+**Seed kinds.** `dataset`, `prompt`, `project_with_runs` (legacy tracing project), `agent` (all four environments are created; runs go to the environments the data lists, via agent addresses), and `experiment` (a project tied to a seeded dataset, one run per example, evaluator scores as feedback). Runs can carry metadata, tags, feedback scores, and `repeat` copies for volume; each seed step is capped at 300 runs. Listings and reset cover agents too.
+
+**24-hour limit.** LangSmith rejects runs whose start time is more than 24 hours in the past (422, `start_time for post must be within ±24 hours`). Seed validation keeps every run within 23 hours, so tasks can't rely on data older than the CLI's default time window.
+
+**Retry seeding.** If seeding fails, the run goes straight to confirm reset with the error, offering reset, keep, or retry; seeding is idempotent, so a retry after a fix skips finished objects. Runs can't be deleted individually, so a step that failed partway through posting runs refuses a retry (it would duplicate runs); that run has to be reset and started again.
 
 **Confirm reset (interrupt).** Shows results and every live manifest entry: reset, keep for inspection (`python -m tester reset <run_id>` later), or quit.
 
@@ -173,6 +179,14 @@ Agents fail on concepts as often as on syntax (which resources belong to an "age
 Placeholders (`<name>`, `$VAR`, `...`) are never flagged as unknown commands.
 
 **Planner.** `propose` gets the titles and descriptions of all snapshot pages plus the top-matching page sections for the intake's flows. It writes tasks as goals in the product's own terms ("set up an eval for my agent's staging environment"), not command names, and cites the pages each task relies on in `docs_refs`.
+
+**Difficulty.** The first live plan passed 8/8 with a few obvious commands each, so it measured little. The generator now has to (see `prompts/generator.md`):
+- defeat a CLI default in at least two tasks: more items than a default page, the interesting data in a non-production environment, or an answer that needs a filter (time windows are out: see the 24-hour limit below)
+- plant decoys (look-alike objects, another environment with different errors, an older experiment that scored differently), checked with `output_excludes` only where a correct answer would never mention the decoy
+- include at least one concept chain: agent → environment → traces, dataset → experiments → scores, trace → child runs
+- check at least one fact only the seed data can give
+
+It also sees earlier runs (`--learn-from`, default: the 3 most recent with `results.jsonl`): each task's verdict and call counts, the commands exercised so far, and the read commands never exercised. That steers each new plan to be harder and to cover new ground.
 
 **Knowledge arms (M3–M4).** Each task × repeat runs once per arm:
 
@@ -247,10 +261,11 @@ Flags are recorded so invented flags can be detected statically from the command
 ```
 
 **Plan validation** (`tester/plan.py`, in code; errors block approval and are sent back to `propose`, up to 2 automatic retries before the reviewer sees them):
-- 3–8 tasks, unique IDs; seed names start with `<run_id>-`; seed kinds `dataset`, `project_with_runs`, `prompt`
+- 3–8 tasks, unique IDs; seed names start with `<run_id>-`; seed kinds `dataset`, `project_with_runs`, `prompt`, `agent` (name must be a valid agent ID), `experiment`
 - `allowed_writes` only lists commands with a name-arg mapping that the inventory classifies as `write`
 - prompts contain no CLI syntax, and every `<run_id>-` name they mention is seeded (or the task may create it)
 - `complete` tasks have hard checks; `object_*` checks only look at `<run_id>-` objects
+- output check values are at least 3 characters, and `output_contains_any` lists at most 4 (longer lists of phrasings pass nearly any answer)
 - every `docs_refs` URL is a page in the snapshot
 
 Review actions: approve, revise with feedback (loops to `propose` with the previous plan, all feedback so far, and any errors), or edit `plan.yaml` by hand (reloaded and revalidated). `python -m tester plan --resume <run_id>` continues a paused run from `runs/checkpoints.sqlite`.
@@ -271,6 +286,9 @@ These shape the parser and graders, and several are report findings already:
 - **`datasets list` help says "default 100"**, but the request it sends uses `limit=20`.
 - **Three phrasings for missing input:** `required flag(s) "dataset" not set`, `Required flags "queue-id, status" not set`, and `--project or --project-id is required`.
 - **`workspaces list` has no `--limit`.** With 55 workspaces it returned 184 KB of JSON, about 3.3 KB each, mostly permission arrays.
+- **`agents list --format json` isn't JSON.** It prints a stream of pretty-printed objects, not an array, so a JSON parser fails on it (`--format jsonl` works).
+- **Private prompts are hard to address.** `prompt pull <name>` requires `owner/repo`; a private prompt's owner is `-`, and `-/name` is parsed as a flag. Only `prompt pull -- -/name` works (an agent took 9 calls to find it). Our sandbox also denies `/name` as an absolute path, a false positive.
+- **Agents act on destructive requests without asking.** In M3 both arms went straight to `projects delete` and `datasets share create`; only policy stopped them, and the answer then told the user how to run both.
 - 275 commands (221 runnable, 54 groups). Cobra pads command names to the longest plus one space, so a two-space parser silently misses `annotation-queues` and `online-evaluators`.
 
 ## Graders (run as parallel branches)

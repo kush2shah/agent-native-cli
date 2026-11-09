@@ -103,6 +103,7 @@ class ExperimentData(BaseModel):
 SCHEMAS = {"prompt": PromptData, "dataset": DatasetData, "project_with_runs": ProjectData,
            "agent": AgentData, "experiment": ExperimentData}
 MAX_RUNS_PER_STEP = 300  # counting repeats and child runs; keeps seeding to a few minutes
+MAX_RUN_AGE_S = 23 * 3600  # LangSmith rejects runs that start more than 24 hours in the past
 
 MATERIALIZE_SYSTEM = """You turn a test plan's description of a seed object into the exact data that will be \
 created in a LangSmith workspace. Follow the description exactly: the same number of items, the same names, \
@@ -169,6 +170,11 @@ def validate_seed_data(seed_data: list[dict]) -> list[str]:
                  or all_runs(s["kind"], data) or [])
         if not items and s["kind"] != "agent":
             errors.append(f"{where}: no examples, runs, rows, or messages")
+        oldest = max((r["start_offset_s"] + (max(1, r.get("repeat", 1)) - 1) * r.get("repeat_spacing_s", 60)
+                      for r in all_runs(s["kind"], data)), default=0)
+        if oldest > MAX_RUN_AGE_S:
+            errors.append(f"{where}: a run starts {oldest / 3600:.1f} hours ago; LangSmith only accepts runs from "
+                          f"the last 24 hours, so keep every run within {MAX_RUN_AGE_S // 3600} hours")
         if run_count(s["kind"], data) > MAX_RUNS_PER_STEP:
             errors.append(f"{where}: {run_count(s['kind'], data)} runs; at most {MAX_RUNS_PER_STEP} per seed step")
         payloads = []
@@ -190,7 +196,7 @@ def validate_seed_data(seed_data: list[dict]) -> list[str]:
 def check_warnings(seed_data: list[dict], plan: dict) -> list[str]:
     """Hard-check values that appear nowhere in the seed data. Not blocking: some
     values describe the answer ("no experiments"), not the data."""
-    blob = json.dumps([s["data"] for s in seed_data]).lower()
+    blob = json.dumps([[s["name"], s["data"]] for s in seed_data]).lower()
     warnings = []
     for t in plan.get("tasks", []):
         for c in t.get("hard_checks", []):

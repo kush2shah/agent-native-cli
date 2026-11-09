@@ -280,11 +280,25 @@ def summarize_seed(step: dict) -> str:
         return f"{len(d['examples'])} examples, e.g. {d['examples'][0]['inputs_json'][:80]}" if d["examples"] else "empty"
     if step["kind"] == "prompt":
         return " / ".join(f"{m['role']}: {m['content'][:60]}" for m in d["messages"])
-    runs = d["runs"]
-    errors = sum(1 for r in runs if r.get("error"))
-    children = sum(len(r.get("children", [])) for r in runs)
-    lat = ", ".join(f"{r['latency_s']:g}s" for r in runs[:12])
-    return f"{len(runs)} root runs ({errors} errored, {children} child runs); latencies {lat}"
+    if step["kind"] == "experiment":
+        scores: dict[str, list[float]] = {}
+        for row in d["rows"]:
+            for s in row.get("scores", []):
+                scores.setdefault(s["key"], []).append(s["score"])
+        means = ", ".join(f"{k} mean {sum(v) / len(v):.3g}" for k, v in scores.items())
+        return f"{len(d['rows'])} rows on {d['dataset']}; {means or 'no scores'}"
+    if step["kind"] == "agent":
+        return "; ".join(f"{e['environment']}: {summarize_runs(e['runs'])}" for e in d["environments"] if e["runs"])
+    return summarize_runs(d["runs"])
+
+
+def summarize_runs(runs: list[dict]) -> str:
+    total = sum(r.get("repeat", 1) for r in runs)
+    errors = sum(r.get("repeat", 1) for r in runs if r.get("error"))
+    oldest = max((r["start_offset_s"] + (r.get("repeat", 1) - 1) * r.get("repeat_spacing_s", 60) for r in runs), default=0)
+    feedback = sum(r.get("repeat", 1) for r in runs if r.get("feedback"))
+    return (f"{total} root runs ({errors} errored, {feedback} with feedback), oldest {oldest / 86400:.1f} days ago; "
+            f"distinct errors: {sorted({r['error'][:40] for r in runs if r.get('error')}) or 'none'}")
 
 
 def ask_confirm_seed(payload: dict) -> dict | None:
@@ -335,8 +349,11 @@ def ask_confirm_reset(payload: dict) -> dict | None:
     print(f"\n{len(payload['live'])} objects in the manifest to delete:")
     for e in payload["live"]:
         print(f"  {e['kind']} {e['name']}  ({e['status']}, by {e['created_by']})")
+    retry = "  [t]ry seeding again" if payload.get("seed_error") else ""
     while True:
-        choice = input("\n[r]eset (delete them)  [k]eep for inspection  [q]uit (resume later)\n> ").strip().lower()
+        choice = input(f"\n[r]eset (delete them)  [k]eep for inspection{retry}  [q]uit (resume later)\n> ").strip().lower()
+        if choice in ("t", "try") and retry:
+            return {"action": "retry_seed"}
         if choice in ("r", "reset"):
             return {"action": "reset"}
         if choice in ("k", "keep"):

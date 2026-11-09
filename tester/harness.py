@@ -130,6 +130,15 @@ class HarnessExecutor:
     def _seeded(self, kind: str, name: str) -> bool:
         return bool(self.manifest.find(kind, name).get("seeded"))
 
+    def _start_posting(self, kind: str, name: str) -> None:
+        """Runs can't be deleted one by one, so a step that failed partway through posting
+        can't be retried without duplicating runs: the run has to be reset instead."""
+        entry = self.manifest.find(kind, name)
+        if entry.get("posting"):
+            raise HarnessError(f"{kind} {name!r} was partly seeded before a failure; retrying would duplicate "
+                               f"runs. Reset this run and start a new one")
+        self.manifest.update(entry, posting=True)
+
     def _mark_seeded(self, kind: str, name: str, **extra) -> None:
         self.manifest.update(self.manifest.find(kind, name), seeded=True, **extra)
 
@@ -172,6 +181,7 @@ class HarnessExecutor:
         pid = self._create("project", name, created_by, make)
         if self._seeded("project", name):
             return pid
+        self._start_posting("project", name)
         posted = self._post_runs(data["runs"], {"project_name": name})
         self._wait_visible({"project_name": name}, sum(n for _, n in posted), timeout_s)
         self._post_feedback(posted)
@@ -188,6 +198,7 @@ class HarnessExecutor:
         aid = self._create("agent", name, created_by, make)
         if self._seeded("agent", name):
             return aid
+        self._start_posting("agent", name)
         sessions = {str(e.environment).lower(): str(e.tracer_session_id)
                     for e in self.client.agents.retrieve(name).environments}
         for stage in data["environments"]:
@@ -219,6 +230,7 @@ class HarnessExecutor:
         pid = self._create("experiment", name, created_by, make)
         if self._seeded("experiment", name):
             return pid
+        self._start_posting("experiment", name)
         now = datetime.now(timezone.utc)
         posted = []
         for i, row in enumerate(data["rows"]):
@@ -255,14 +267,18 @@ class HarnessExecutor:
 
     def _post_run(self, dest: dict, run: dict, run_id, trace_id, parent_id, start: datetime, dotted: str,
                   **extra) -> None:
-        outputs = json.loads(run["outputs_json"]) if run.get("outputs_json") else None
-        metadata = json.loads(run["metadata_json"]) if run.get("metadata_json") else None
+        # Optional fields are left out rather than passed as None: the SDK mutates `extra` in place.
+        optional = {
+            "outputs": json.loads(run["outputs_json"]) if run.get("outputs_json") else None,
+            "error": run.get("error") or None,
+            "tags": run.get("tags") or None,
+            "extra": {"metadata": json.loads(run["metadata_json"])} if run.get("metadata_json") else None,
+        }
         self.client.create_run(
             name=run["name"], inputs=json.loads(run["inputs_json"]), run_type=run["run_type"],
             id=run_id, trace_id=trace_id, parent_run_id=parent_id, dotted_order=dotted,
             start_time=start, end_time=start + timedelta(seconds=run["latency_s"]),
-            outputs=outputs, error=run.get("error") or None, tags=run.get("tags") or None,
-            extra={"metadata": metadata} if metadata else None, **dest, **extra,
+            **{k: v for k, v in optional.items() if v is not None}, **dest, **extra,
         )
 
     def _post_feedback(self, posted: list[tuple[tuple, int]]) -> None:

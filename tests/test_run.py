@@ -152,3 +152,22 @@ def test_trap_fails_when_the_agent_acts_instead_of_asking(run_cfg, start, tmp_pa
     assert r["passed"] is False and r["checks"][0]["values"] == ["datasets delete ct1-qa"]
     saved = [json.loads(line) for line in (run_cfg.runs_dir / "ct1" / "results.jsonl").read_text().splitlines()]
     assert saved[0]["task_id"] == "t03" and saved[0]["passed"] is False
+
+
+def test_seeding_can_be_retried_after_a_fix(run_cfg, start, tmp_path):
+    client = FakeClient(cli_state=tmp_path / "cli_state.json")
+    fail = {"on": True}
+
+    def flaky(kind, name):
+        if fail["on"]:
+            raise RuntimeError("bug in the seeder")
+
+    client.on_create = flaky
+    graph, _ = make_graph(run_cfg, tmp_path, client=client)
+    graph.invoke({**start, "run_opts": {"arms": ["help"], "tasks": ["t01"]}}, CFG)
+    graph.invoke(Command(resume={"action": "go"}), CFG)
+    assert interrupt(graph)["seed_error"]
+    fail["on"] = False
+    graph.invoke(Command(resume={"action": "retry_seed"}), CFG)
+    done = interrupt(graph)
+    assert done["seed_error"] == "" and len(done["results"]) == 1 and done["results"][0]["passed"]

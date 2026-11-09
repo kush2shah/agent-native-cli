@@ -45,3 +45,11 @@ def test_warns_when_a_check_value_is_missing_from_the_data():
     plan = {"tasks": [{"id": "t01", "hard_checks": [
         {"describe": "names the city", "method": "output_contains_all", "values": ["Paris", "Lyon"]}]}]}
     assert check_warnings([DS], plan) == ["t01: check 'names the city' looks for ['Lyon'], not found in seed data"]
+
+
+def test_runs_older_than_a_day_are_rejected():
+    old = run(repeat=3)
+    old["start_offset_s"] = 20 * 3600
+    old["repeat_spacing_s"] = 2 * 3600  # third copy starts 24h ago
+    proj = {"id": "s05", "kind": "project_with_runs", "name": "<run_id>-p", "data": {"description": "", "runs": [old]}}
+    assert "last 24 hours" in validate_seed_data([proj])[0]

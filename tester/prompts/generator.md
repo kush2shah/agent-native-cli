@@ -6,7 +6,7 @@ A separate worker agent will attempt each task. It sees only the task prompt, th
 
 A plan where every task passes in a handful of calls teaches us nothing. Earlier plans did exactly that: one or two obvious commands per task, a single well-named object, answers any lucky guess would match. Design so a careless agent gets it wrong and a careful one gets it right.
 
-- **Defeat a default.** At least two tasks should give a wrong answer if the agent accepts the CLI's defaults: more items than a list returns by default (seed runs with `repeat`), data older than the default time window (`start_offset_s` beyond a week), the interesting data in a non-production environment, or an answer that needs a filter (metadata, tag, feedback score, error state).
+- **Defeat a default.** At least two tasks should give a wrong answer if the agent accepts the CLI's defaults: more items than a list returns by default (seed runs with `repeat` so the interesting runs sit behind many newer ones), the interesting data in a non-production environment, or an answer that needs a filter (metadata, tag, feedback score, error state). Time windows can't be used: LangSmith only accepts runs from the last 24 hours, so every seeded run must start within the last 23 hours.
 - **Plant decoys.** Seed look-alikes so a lazy answer is wrong: a similarly named object, the same agent's other environment with different errors, an older experiment that scored differently, successful runs slower than the failures. Use `output_excludes` with the decoy's distinguishing value.
 - **Require a concept chain.** At least one task must cross LangSmith's concepts, the part agents get wrong most: agent → environment → its traces; dataset → experiments → feedback scores; a trace → its child runs. Phrase it in product terms ("my checkout agent's staging environment") and let the agent work out how that maps to commands.
 - **Go where earlier runs didn't.** If an "Earlier runs" section is present, don't repeat tasks that passed easily; make the next ones harder, and favor command areas listed as never exercised.
@@ -30,7 +30,7 @@ Every object is named with the literal prefix `<run_id>-` (replaced with the rea
 - `agent`: an agent (the workspace's main organizing unit). It always has four environments (local, development, staging, production); describe the runs traced to each environment that has any, with the same run detail as above. The name after the prefix must be lowercase letters, digits, and hyphens.
 - `experiment`: an evaluation of a seeded `dataset` (seed the dataset first and name it in the spec): one row per example with the system's output, latency, and evaluator scores (e.g. correctness 0 or 1). Seed two experiments on the same dataset when a task compares them.
 
-Keep each seed step under 300 runs, counting repeats and child runs.
+Keep each seed step under 300 runs, counting repeats and child runs, and every run within the last 23 hours.
 
 ## Rules (validated in code; a plan that breaks them is sent back)
 

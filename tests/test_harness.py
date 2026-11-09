@@ -57,7 +57,7 @@ def test_project_runs_are_posted_with_trees_and_waited_for(tmp_path):
     assert child["parent_run_id"] == root["id"] == child["trace_id"]
     assert child["dotted_order"].startswith(root["dotted_order"] + ".")
     assert (root["end_time"] - root["start_time"]).total_seconds() == 30
-    assert root["error"] == "Boom" and root["outputs"] is None
+    assert root["error"] == "Boom" and "outputs" not in root and "extra" not in root and "tags" not in root
 
 
 def test_runs_that_never_show_up_fail_loudly(tmp_path):
@@ -150,3 +150,23 @@ def test_experiment_links_runs_to_examples_and_scores_them(ex):
 def test_experiment_needs_its_dataset_seeded_first(ex):
     with pytest.raises(HarnessError, match="isn't seeded"):
         ex.create_experiment("ct1-baseline", {"description": "", "dataset": "<run_id>-qa", "rows": []}, "ct1-qa")
+
+
+def test_a_partly_seeded_step_cannot_be_retried(tmp_path):
+    client = FakeClient()
+    posts = {"n": 0}
+    real = client.create_run
+
+    def flaky(**kw):
+        posts["n"] += 1
+        if posts["n"] == 2:
+            raise RuntimeError("422 start_time out of range")
+        real(**kw)
+
+    client.create_run = flaky
+    ex = HarnessExecutor(client, "ct1", Manifest(tmp_path / "m.json"), sleep=lambda s: None)
+    with pytest.raises(RuntimeError):
+        ex.create_project_with_runs("ct1-bot", PROJECT)
+    with pytest.raises(HarnessError, match="partly seeded"):
+        ex.create_project_with_runs("ct1-bot", PROJECT)
+    assert len(client.runs) == 1  # no duplicates
