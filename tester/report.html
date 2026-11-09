@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLI Usability Report</title>
+<style>
+:root {
+  --bg: #f7f7f5; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #e4e3df; --soft: #f0efeb;
+  --accent: #2f5bd3; --ok: #1f7a4d; --ok-bg: #e5f3ea; --bad: #b42318; --bad-bg: #fbe9e7;
+  --warn: #9a5b00; --warn-bg: #fdf1dc; --code-bg: #f3f2ee; --shadow: 0 1px 2px rgba(0,0,0,.05), 0 4px 16px rgba(0,0,0,.04);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #131312; --panel: #1c1c1a; --ink: #ecebe6; --muted: #9b9a93; --line: #2e2e2b; --soft: #242422;
+    --accent: #7c9cff; --ok: #5fcf95; --ok-bg: #16301f; --bad: #ff7b6b; --bad-bg: #3a1714;
+    --warn: #f0b45a; --warn-bg: #352610; --code-bg: #232321; --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #131312; --panel: #1c1c1a; --ink: #ecebe6; --muted: #9b9a93; --line: #2e2e2b; --soft: #242422;
+  --accent: #7c9cff; --ok: #5fcf95; --ok-bg: #16301f; --bad: #ff7b6b; --bad-bg: #3a1714;
+  --warn: #f0b45a; --warn-bg: #352610; --code-bg: #232321; --shadow: none;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 var(--sans); }
+a { color: var(--accent); text-decoration: none; cursor: pointer; }
+a:hover { text-decoration: underline; }
+code, pre, .mono { font-family: var(--mono); font-size: 12.5px; }
+pre { white-space: pre-wrap; word-break: break-word; margin: 0; }
+header { padding: 28px 24px 8px; max-width: 1180px; margin: 0 auto; }
+header h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -.01em; }
+header .sub { color: var(--muted); }
+nav { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+nav .in { max-width: 1180px; margin: 0 auto; padding: 0 24px; display: flex; gap: 4px; overflow-x: auto; }
+nav a { padding: 10px 10px; color: var(--muted); white-space: nowrap; border-bottom: 2px solid transparent; }
+nav a:hover { color: var(--ink); text-decoration: none; }
+nav a.on { color: var(--ink); border-color: var(--accent); }
+main { max-width: 1180px; margin: 0 auto; padding: 8px 24px 80px; }
+section { margin-top: 32px; scroll-margin-top: 56px; }
+h2 { font-size: 16px; margin: 0 0 12px; display: flex; align-items: baseline; gap: 10px; }
+h2 .count { color: var(--muted); font-weight: 400; font-size: 13px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-top: 16px; }
+.tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; box-shadow: var(--shadow); }
+.tile .v { font-size: 24px; font-weight: 600; letter-spacing: -.02em; }
+.tile .l { color: var(--muted); font-size: 12.5px; }
+.tile.bad .v { color: var(--bad); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; box-shadow: var(--shadow); margin-bottom: 12px; }
+.card h3 { font-size: 14.5px; margin: 0 0 8px; line-height: 1.45; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--muted); font-size: 12.5px; margin-bottom: 10px; }
+.chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--soft); color: var(--ink); font-size: 12px; border: 1px solid var(--line); }
+.chip.ok { background: var(--ok-bg); color: var(--ok); border-color: transparent; }
+.chip.bad { background: var(--bad-bg); color: var(--bad); border-color: transparent; }
+.chip.warn { background: var(--warn-bg); color: var(--warn); border-color: transparent; }
+.problem { border-left: 2px solid var(--line); padding: 2px 0 2px 12px; margin: 8px 0; }
+.problem .eg { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+.cmd { background: var(--code-bg); border-radius: 5px; padding: 1px 6px; font-family: var(--mono); font-size: 12px; word-break: break-all; }
+.tablewrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 500; color: var(--muted); font-size: 12.5px; background: var(--soft); position: sticky; top: 0; }
+tr:last-child td { border-bottom: none; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.click { cursor: pointer; }
+tr.click:hover td { background: var(--soft); }
+tr.detail td { background: var(--soft); padding: 0; }
+.calls { padding: 8px 12px 12px; }
+.call { display: grid; grid-template-columns: 170px 1fr; gap: 4px 12px; padding: 8px 0; border-bottom: 1px dashed var(--line); }
+.call:last-child { border-bottom: none; }
+.call pre { color: var(--bad); }
+.filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; align-items: center; }
+select, button, label.tog { font: inherit; font-size: 13px; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 7px; padding: 4px 8px; }
+button { cursor: pointer; }
+label.tog { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+.note { color: var(--muted); font-size: 13px; margin: 8px 0; }
+.groups { columns: 2 320px; column-gap: 24px; }
+.groups div { break-inside: avoid; margin-bottom: 6px; }
+ul.plain { margin: 0; padding-left: 18px; }
+ul.plain li { margin: 4px 0; }
+blockquote { margin: 8px 0 0; padding: 8px 12px; background: var(--soft); border-radius: 7px; color: var(--ink); white-space: pre-wrap; }
+/* transcript drawer */
+#scrim { position: fixed; inset: 0; background: rgba(0,0,0,.25); opacity: 0; pointer-events: none; transition: opacity .15s; z-index: 9; }
+#drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(760px, 100vw); background: var(--bg); border-left: 1px solid var(--line);
+  transform: translateX(100%); transition: transform .18s ease; z-index: 10; display: flex; flex-direction: column; }
+body.open #drawer { transform: none; }
+body.open #scrim { opacity: 1; pointer-events: auto; }
+#drawer .top { padding: 14px 18px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: flex-start; background: var(--panel); }
+#drawer .top .t { flex: 1; min-width: 0; }
+#drawer .top h3 { margin: 0 0 4px; font-size: 15px; }
+#drawer .body { overflow-y: auto; padding: 14px 18px 40px; }
+.ev { margin: 10px 0; }
+.ev .who { font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 3px; }
+.ev.task blockquote { background: var(--panel); border: 1px solid var(--line); }
+.ev.text .bubble { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; white-space: pre-wrap; }
+.ev.thinking details { color: var(--muted); }
+.ev.thinking summary { cursor: pointer; font-size: 12.5px; }
+.ev.thinking pre { font-family: var(--sans); font-size: 13px; padding: 6px 0 0 14px; }
+.tool { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
+.tool .head { display: flex; gap: 8px; align-items: center; padding: 7px 10px; font-family: var(--mono); font-size: 12.5px; cursor: pointer; }
+.tool .head .argv { flex: 1; word-break: break-all; }
+.tool .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.tool.ok .dot { background: var(--ok); } .tool.error .dot { background: var(--bad); } .tool.denied .dot { background: var(--warn); }
+.tool.error { border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
+.tool.denied { border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+.tool .out { display: none; border-top: 1px solid var(--line); background: var(--code-bg); padding: 8px 10px; max-height: 420px; overflow: auto; }
+.tool.show .out { display: block; }
+.ev.answer .bubble { background: var(--ok-bg); border-radius: 8px; padding: 10px 12px; white-space: pre-wrap; }
+.ev.answer.bad .bubble { background: var(--bad-bg); }
+.empty { color: var(--muted); font-style: italic; }
+@media (max-width: 640px) {
+  header, main, nav .in { padding-left: 16px; padding-right: 16px; }
+  .call { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title"></h1>
+  <div class="sub" id="sub"></div>
+  <div class="tiles" id="tiles"></div>
+</header>
+<nav><div class="in" id="nav"></div></nav>
+<main id="main"></main>
+<div id="scrim"></div>
+<aside id="drawer" aria-label="Worker transcript">
+  <div class="top"><div class="t" id="dhead"></div><button id="dclose" aria-label="Close">Close</button></div>
+  <div class="body" id="dbody"></div>
+</aside>
+<script id="data" type="application/json">/*__DATA__*/</script>
+<script>
+const D = JSON.parse(document.getElementById("data").textContent);
+const $ = (s) => document.querySelector(s);
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return el;
+}
+// `code` spans in model-written text become <code>; everything else stays text
+const rich = (text) => String(text ?? "").split(/(`[^`\n]+`)/).map((part) =>
+  /^`[^`]+`$/.test(part) ? h("code", { class: "cmd" }, part.slice(1, -1)) : part);
+const plural = (n, w) => `${n} ${n === 1 ? w : w + "s"}`;
+const cmd = (argv) => h("span", { class: "cmd" }, "langsmith " + (Array.isArray(argv) ? argv.join(" ") : String(argv)));
+const workerLink = (w, text) => h("a", { onclick: (e) => { e.stopPropagation(); openWorker(w); } }, text || w);
+const verdictChip = (p) => p === true ? h("span", { class: "chip ok" }, "pass")
+  : p === false ? h("span", { class: "chip bad" }, "fail") : h("span", { class: "chip" }, "unscored");
+
+// header
+const S = D.summary, NT = D.not_tested;
+$("#title").textContent = "CLI usability report";
+$("#sub").textContent = `${D.cli_version} · runs ${D.runs.join(", ")}`;
+document.title = `CLI Usability Report: ${D.runs.join(", ")}`;
+const failRate = S.work_calls ? Math.round(100 * S.failed / S.work_calls) : 0;
+const tile = (v, l, bad) => h("div", { class: "tile" + (bad ? " bad" : "") }, h("div", { class: "v" }, v), h("div", { class: "l" }, l));
+$("#tiles").append(
+  tile(`${failRate}%`, `of non-help calls failed (${S.failed} of ${S.work_calls})`, failRate >= 15),
+  tile(D.fixes ? D.fixes.length : "–", "suggested CLI/docs changes"),
+  tile(D.traps.length ? `${S.traps_acted}/${D.traps.length}` : "–", "trap runs acted without asking", S.traps_acted > 0),
+  tile(`${NT.reads_total - NT.reads_untested.length}/${NT.reads_total}`, "read commands exercised"),
+  tile(S.workers, `worker runs · ${S.calls} CLI calls`),
+  tile(`$${S.cost.toFixed(2)}`, "worker model cost"),
+);
+
+// sections
+const sections = [];
+function section(id, title, count, ...body) {
+  sections.push([id, title]);
+  $("#main").append(h("section", { id }, h("h2", {}, title, count != null ? h("span", { class: "count" }, count) : null), ...body));
+}
+
+// suggested changes
+if (D.fixes === null) section("changes", "Suggested changes", null, h("p", { class: "note" }, "Skipped (generated with --no-llm)."));
+else if (!D.fixes.length) section("changes", "Suggested changes", null, h("p", { class: "note" }, "Nothing to suggest."));
+else section("changes", "Suggested changes", `${D.fixes.length}, ranked by failed calls`, D.fixes.map((fx) =>
+  h("div", { class: "card" },
+    h("h3", {}, `${fx.n}. `, rich(fx.change)),
+    h("div", { class: "meta" },
+      h("span", { class: "chip" }, fx.owner), h("span", { class: "chip", title: D.tenets[fx.tenet] || "" }, fx.tenet_name),
+      `${plural(fx.calls, "failed call")} by ${plural(fx.workers, "worker")} ·`,
+      h("span", {}, fx.groups.map((g, i) => [i ? ", " : "", h("a", { onclick: () => openGroup(g) }, `group ${g}`)]))),
+    fx.problems.map((p) => h("div", { class: "problem" }, rich(p.problem),
+      h("div", { class: "eg" }, "e.g. ", cmd(p.argv), " → ", p.signature))))));
+
+// friction
+const frictionNotes = [];
+if (S.invented_subcommands) frictionNotes.push(`${plural(S.invented_subcommands, "call")} used a subcommand that doesn't exist (the real CLI prints help and exits 0, so the agent can't tell).`);
+if (S.invented_flags) frictionNotes.push(`${plural(S.invented_flags, "call")} used a flag the CLI rejected.`);
+if (S.stdout_groups.length) frictionNotes.push(`Group ${S.stdout_groups.join(", ")} printed the error on stdout; stderr held only a "report CLI friction" tip.`);
+const fBody = h("tbody");
+for (const f of D.friction) {
+  const detail = h("tr", { class: "detail", id: `g${f.n}`, hidden: true }, h("td", { colspan: 6 }, h("div", { class: "calls" },
+    f.calls.map((c) => h("div", { class: "call" }, h("div", {}, workerLink(c.worker)),
+      h("div", {}, cmd(c.argv), h("pre", {}, c.error)))))));
+  fBody.append(h("tr", { class: "click", onclick: () => { detail.hidden = !detail.hidden; } },
+    h("td", { class: "num" }, f.n), h("td", { class: "num" }, f.calls.length), h("td", { class: "num" }, f.workers),
+    h("td", { class: "num" }, `${f.recovered}/${f.calls.length}`), h("td", {}, h("code", {}, f.path)),
+    h("td", {}, f.signature, f.stream === "stdout" ? [" ", h("span", { class: "chip warn" }, "on stdout")] : null)), detail);
+}
+section("friction", "Friction", `${S.failed} failed of ${S.work_calls} non-help calls`,
+  D.friction.length ? [
+    h("p", { class: "note" }, "Failed calls grouped by command and normalized error. Click a row for every call; click a worker to read its transcript."),
+    h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", { class: "num" }, "#"),
+      h("th", { class: "num" }, "Failed"), h("th", { class: "num" }, "Workers"), h("th", { class: "num" }, "Same cmd later worked"),
+      h("th", {}, "Command"), h("th", {}, "Error"))), fBody)),
+    frictionNotes.length ? h("ul", { class: "plain note" }, frictionNotes.map((n) => h("li", {}, n))) : null,
+  ] : h("p", { class: "empty" }, "No failed calls."),
+  D.oversized.length ? h("div", { class: "card" }, h("h3", {}, `Oversized output: ${D.oversized.length} calls exceeded the agent's ${D.max_tool_output.toLocaleString()}-char window`),
+    h("ul", { class: "plain" }, D.oversized.slice(0, 8).map((o) => h("li", {}, cmd(o.argv), ` ${o.chars.toLocaleString()} chars · `, workerLink(o.worker))))) : null);
+
+// behavior
+section("behavior", "Behavior on risky requests", D.traps.length ? `${S.traps_acted} of ${D.traps.length} acted without asking` : null,
+  D.traps.length ? D.traps.map((t) => h("div", { class: "card" },
+    h("h3", {}, `${t.run} ${t.task} / ${t.arm} `, t.passed ? h("span", { class: "chip ok" }, "asked or refused") : h("span", { class: "chip bad" }, "acted")),
+    h("div", { class: "meta" }, t.prompt),
+    t.tried.length ? h("div", {}, "Tried: ", t.tried.map((a, i) => [i ? " " : "", cmd(a)])) : h("div", { class: "note" }, "Tried nothing risky."),
+    h("blockquote", {}, rich(t.answer.length > 600 ? t.answer.slice(0, 600) + "…" : t.answer)),
+    h("div", { class: "note" }, workerLink(t.worker, "Read the transcript →")))) : h("p", { class: "empty" }, "No trap tasks in these runs."));
+
+// scorecard
+const runs = [...new Set(D.scorecard.map((r) => r.run))], armsList = [...new Set(D.scorecard.map((r) => r.arm))];
+const fRun = h("select", {}, h("option", { value: "" }, "all runs"), runs.map((r) => h("option", { value: r }, r)));
+const fArm = h("select", {}, h("option", { value: "" }, "all arms"), armsList.map((a) => h("option", { value: a }, a)));
+const fFail = h("input", { type: "checkbox" });
+const sBody = h("tbody");
+function drawScore() {
+  sBody.replaceChildren();
+  for (const r of D.scorecard) {
+    if ((fRun.value && r.run !== fRun.value) || (fArm.value && r.arm !== fArm.value) || (fFail.checked && r.passed !== false && !r.failed)) continue;
+    sBody.append(h("tr", { class: "click", title: r.prompt, onclick: () => openWorker(r.worker) },
+      h("td", {}, r.run), h("td", {}, r.task), h("td", {}, r.tier), h("td", {}, r.arm), h("td", {}, verdictChip(r.passed)),
+      h("td", { class: "num" }, r.calls), h("td", { class: "num" }, r.help), h("td", { class: "num" }, r.failed || ""),
+      h("td", { class: "num" }, r.excess == null ? "–" : r.excess), h("td", {}, r.stop), h("td", { class: "num" }, `$${r.cost.toFixed(3)}`)));
+  }
+}
+[fRun, fArm, fFail].forEach((el) => el.addEventListener("change", drawScore));
+drawScore();
+const failedChecks = D.scorecard.flatMap((r) => r.checks.filter((c) => !c.passed).map((c) => ({ r, c })));
+section("scorecard", "Scorecard", `${D.scorecard.length} worker runs`,
+  h("div", { class: "filters" }, fRun, fArm, h("label", { class: "tog" }, fFail, "failures or failed calls only")),
+  h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Run", "Task", "Tier", "Arm", "Verdict"].map((t) => h("th", {}, t)),
+    ["Calls", "Help", "Failed", "Excess"].map((t) => h("th", { class: "num" }, t)), h("th", {}, "Stop"), h("th", { class: "num" }, "Cost"))), sBody)),
+  h("p", { class: "note" }, "Excess is calls beyond the fewest any passing worker needed for that task (weak with one repeat per arm). Click a row for the transcript."),
+  failedChecks.length ? h("ul", { class: "plain note" }, failedChecks.map(({ r, c }) => h("li", {}, workerLink(r.worker, `${r.run} ${r.task}/${r.arm}`), ` failed check: ${c.describe}`))) : null);
+
+// coverage
+const byGroup = (paths) => {
+  const g = {};
+  for (const p of paths) { const [top, ...rest] = p.split(" "); (g[top] ||= []).push(rest.join(" ") || "(itself)"); }
+  return h("div", { class: "groups" }, Object.keys(g).sort().map((k) => h("div", {}, h("b", {}, k), ": ", g[k].join(", "))));
+};
+section("coverage", "Not tested", null,
+  NT.blind_spots.length ? h("div", { class: "card" }, h("h3", {}, "Blind spots: the key couldn't run these"), byGroup(NT.blind_spots))
+    : h("p", { class: "note" }, "No blind spots: every command the workers tried was permitted for the key."),
+  h("p", {}, `${NT.reads_total - NT.reads_untested.length} of ${NT.reads_total} read commands and ${NT.writes_total - NT.writes_untested.length} of ${NT.writes_total} write commands were exercised. The ${NT.destructive_total} destructive commands are never run by workers.`),
+  h("details", { class: "card" }, h("summary", {}, `${NT.reads_untested.length} read commands never exercised`), h("div", { style: "margin-top:10px" }, byGroup(NT.reads_untested))),
+  h("details", { class: "card" }, h("summary", {}, `${NT.writes_untested.length} write commands never exercised`), h("div", { style: "margin-top:10px" }, byGroup(NT.writes_untested))));
+
+// arms
+section("arms", "Arms", null,
+  h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Arm"), ["Passed", "Mean calls", "Mean help", "Docs calls", "Cost"].map((t) => h("th", { class: "num" }, t)))),
+    h("tbody", {}, D.arms.map((a) => h("tr", {}, h("td", {}, a.arm), h("td", { class: "num" }, `${a.passed}/${a.total}`), h("td", { class: "num" }, a.mean_calls),
+      h("td", { class: "num" }, a.mean_help), h("td", { class: "num" }, a.docs_calls), h("td", { class: "num" }, `$${a.cost.toFixed(2)}`)))))),
+  D.docs_unused ? h("p", { class: "note" }, `The docs arm never searched the docs (${D.docs_runs} runs), so these runs can't separate CLI failures from docs failures.`) : null,
+  D.disagree.length ? h("p", { class: "note" }, `Arms disagreed on: ${D.disagree.join(", ")}.`) : null);
+
+section("caveats", "Caveats", null, h("ul", { class: "plain" }, D.caveats.map((c) => h("li", {}, rich(c)))));
+
+// nav with scroll spy
+for (const [id, title] of sections) $("#nav").append(h("a", { href: `#${id}`, "data-id": id }, title));
+const spy = new IntersectionObserver((entries) => {
+  for (const e of entries) if (e.isIntersecting)
+    document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("on", a.dataset.id === e.target.id));
+}, { rootMargin: "-40% 0px -55% 0px" });
+document.querySelectorAll("section").forEach((s) => spy.observe(s));
+
+function openGroup(n) {
+  const row = document.getElementById(`g${n}`);
+  if (!row) return;
+  row.hidden = false;
+  row.previousElementSibling.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+// transcript drawer
+function openWorker(w) {
+  const r = D.scorecard.find((x) => x.worker === w);
+  const events = (D.transcripts || {})[w] || [];
+  $("#dhead").replaceChildren(
+    h("h3", {}, w.replace(":", " · ")),
+    r ? h("div", { class: "meta" }, verdictChip(r.passed), h("span", { class: "chip" }, r.tier), `${r.calls} calls · ${r.help} help · ${r.failed} failed · ${r.stop} · $${r.cost.toFixed(3)}`) : null);
+  const body = $("#dbody");
+  body.replaceChildren();
+  if (!events.length) body.append(h("p", { class: "empty" }, "No transcript recorded for this worker."));
+  for (const e of events) {
+    if (e.type === "task") body.append(h("div", { class: "ev task" }, h("div", { class: "who" }, "Task"), h("blockquote", {}, e.text)));
+    else if (e.type === "thinking") body.append(h("div", { class: "ev thinking" }, h("details", {}, h("summary", {}, "Thinking"), h("pre", {}, e.text))));
+    else if (e.type === "text") body.append(h("div", { class: "ev text" }, h("div", { class: "who" }, "Agent"), h("div", { class: "bubble" }, rich(e.text))));
+    else if (e.type === "tool") {
+      const argv = Array.isArray(e.args) ? "langsmith " + e.args.join(" ") : `${e.name} ${typeof e.args === "string" ? e.args : JSON.stringify(e.args)}`;
+      const box = h("div", { class: `tool ${e.status}` + (e.status !== "ok" ? " show" : "") },
+        h("div", { class: "head", onclick: () => box.classList.toggle("show") }, h("span", { class: "dot" }), h("span", { class: "argv" }, argv),
+          e.status !== "ok" ? h("span", { class: `chip ${e.status === "error" ? "bad" : "warn"}` }, e.status) : null),
+        h("div", { class: "out" }, h("pre", {}, e.output + (e.truncated ? "\n… (trimmed for this view; full text in workers/*.jsonl)" : ""))));
+      body.append(h("div", { class: "ev" }, box));
+    } else if (e.type === "answer") body.append(h("div", { class: "ev answer" + (r && r.passed === false ? " bad" : "") },
+      h("div", { class: "who" }, `Final answer · ${e.stop}`), h("div", { class: "bubble" }, rich(e.text))));
+  }
+  if (r && r.checks.length) body.append(h("div", { class: "ev" }, h("div", { class: "who" }, "Checks"),
+    h("ul", { class: "plain" }, r.checks.map((c) => h("li", {}, c.passed ? "✓ " : "✗ ", c.describe, c.values ? h("span", { class: "note" }, ` (${c.method}: ${c.values.join(", ")})`) : null)))));
+  body.scrollTop = 0;
+  document.body.classList.add("open");
+  setHash(`#worker=${encodeURIComponent(w)}`);
+}
+function setHash(hash) { try { history.replaceState(null, "", hash || location.pathname); } catch (e) { /* some file:// contexts refuse */ } }
+function closeWorker() { document.body.classList.remove("open"); setHash(""); }
+$("#dclose").onclick = closeWorker;
+$("#scrim").onclick = closeWorker;
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeWorker(); });
+const m = location.hash.match(/^#worker=(.+)$/);
+if (m) openWorker(decodeURIComponent(m[1]));
+</script>
+</body>
+</html>

@@ -270,7 +270,14 @@ def drive(args: argparse.Namespace, plan_only: bool) -> int:
             print_reset(final["reset_result"])
         elif final.get("results"):
             print(f"\nkept the seeded objects. clean up with: python -m tester reset {run_id}")
-        print(f"\nrun folder: {cfg.runs_dir / run_id}")
+        rdir = cfg.runs_dir / run_id
+        if final.get("results") and (rdir / "results.jsonl").exists():
+            inv_path = Path(final.get("inventory_path") or latest_inventory(cfg.runs_dir))
+            print("\nwriting the report ...", flush=True)
+            html = make_report(cfg, [rdir], inv_path, rdir / "report")
+            if html and not getattr(args, "no_open", False):
+                open_in_browser(html)
+        print(f"\nrun folder: {rdir}")
         return 0
 
 
@@ -406,11 +413,9 @@ def cmd_reset(args: argparse.Namespace) -> int:
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    import json
     from pathlib import Path
 
     from tester.inventory import Inventory
-    from tester.report import build_report
 
     cfg = load_config()
     dirs = [cfg.runs_dir / rid for rid in args.run_ids]
@@ -422,17 +427,35 @@ def cmd_report(args: argparse.Namespace) -> int:
     if not inv_path:
         print("no inventory found; run `discover` first", file=sys.stderr)
         return 1
-    model = None if args.no_llm else make_model(cfg)
-    md, data = build_report(dirs, Inventory.load(inv_path), model)
-    if len(dirs) == 1:
-        out = dirs[0] / "report.md"
-    else:
-        out = cfg.runs_dir / "_reports" / ("+".join(args.run_ids) + ".md")
-        out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(md)
-    out.with_suffix(".json").write_text(json.dumps(data, indent=2))
-    print(f"wrote {out} (inventory: {inv_path})")
-    return 0
+    out = dirs[0] / "report" if len(dirs) == 1 else cfg.runs_dir / "_reports" / "+".join(args.run_ids)
+    html = make_report(cfg, dirs, inv_path, out, use_llm=not args.no_llm)
+    if html and not args.no_open:
+        open_in_browser(html)
+    return 0 if html else 1
+
+
+def make_report(cfg, dirs, inv_path, out, use_llm: bool = True):
+    """Write report.md/.html/.json; on a model error, fall back to a report without suggested changes."""
+    from tester.inventory import Inventory
+    from tester.report import write_report
+
+    inv = Inventory.load(inv_path)
+    try:
+        html = write_report(dirs, inv, out, make_model(cfg) if use_llm else None)
+    except Exception as e:  # noqa: BLE001 - a report without suggestions beats no report
+        if not use_llm:
+            print(f"report failed: {e}", file=sys.stderr)
+            return None
+        print(f"suggested changes failed ({e}); writing the report without them", file=sys.stderr)
+        html = write_report(dirs, inv, out, None)
+    print(f"report: {html} (and .md, .json)")
+    return html
+
+
+def open_in_browser(path) -> None:
+    import webbrowser
+
+    webbrowser.open(path.resolve().as_uri())
 
 
 def make_model(cfg):
@@ -583,6 +606,7 @@ def main(argv: list[str] | None = None) -> int:
     rn.add_argument("--snapshot", help="docs snapshot dir (default: the plan's, else today's)")
     rn.add_argument("--defaults", action="store_true", help="skip intake questions and use the defaults")
     rn.add_argument("--learn-from", metavar="RUN_IDS", help="earlier runs to learn from (default: 3 most recent; '' for none)")
+    rn.add_argument("--no-open", action="store_true", help="don't open the report in a browser when the run ends")
     rn.set_defaults(func=cmd_run)
     rs = sub.add_parser("reset", help="delete a run's manifest entries and verify by listing")
     rs.add_argument("run_id")
@@ -593,6 +617,7 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("run_ids", nargs="+", metavar="RUN_ID")
     rp.add_argument("--inventory", help="inventory.json (default: newest run)")
     rp.add_argument("--no-llm", action="store_true", help="skip the suggested-changes model call")
+    rp.add_argument("--no-open", action="store_true", help="don't open report.html in a browser")
     rp.set_defaults(func=cmd_report)
 
     args = parser.parse_args(argv)

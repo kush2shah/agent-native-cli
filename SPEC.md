@@ -14,7 +14,7 @@ This is a prototype, not a product. Favor simple and readable over general. Buil
 ## Non-goals (for now)
 
 - Supporting any CLI other than the one configured
-- A UI (terminal only)
+- A UI for driving runs (the terminal drives everything; the report has a read-only HTML viewer)
 - LangSmith Engine integration
 - Model comparisons (knowledge comparisons are in scope; see Docs)
 - Handling CLI version changes
@@ -321,7 +321,9 @@ These shape the parser and graders, and several are report findings already:
 
 ## Report (`report.md`)
 
-`python -m tester report RUN_ID [RUN_ID ...] [--no-llm]` writes `runs/<id>/report.md` (or `runs/_reports/<a>+<b>.md` for several runs) plus a `.json` with the same data. Everything but section 3 is computed from `results.jsonl`, `commands.jsonl`, `reset.json`, and the inventory.
+`python -m tester report RUN_ID [RUN_ID ...] [--no-llm] [--no-open]` writes `runs/<id>/report.md`, `report.html` and `report.json` (or `runs/_reports/<a>+<b>.*` for several runs) and opens the HTML. `run` does the same when a run finishes (`--no-open` to skip the browser); if the suggested-changes call fails, the report is written without them.
+
+The markdown and the HTML render one data dict (`compute()`), so they can't disagree. **report.html** is `tester/report.html` with that dict embedded: a single offline file, no external requests. It adds what markdown can't: friction rows expand to every failing call; scorecard rows (filterable by run, arm, and failures), trap cards and worker links open that worker's transcript in a side panel (task, collapsed thinking, each CLI call colored ok/error/denied with its output, final answer, checks); `#worker=<run>:<task>/<arm>/r<n>` deep-links a transcript. Transcript events are trimmed to 6,000 chars in the view; `report.json` leaves transcripts out since they're in `workers/`. Everything but section 3 is computed from `results.jsonl`, `commands.jsonl`, `reset.json`, and the inventory.
 
 Every logged call gets a kind: `help`, `ok`, `cli_error`, `permission` (HTTP 401/403 or permission wording; a "401 days" in a message doesn't count), `invented_subcommand`, `policy` (a write or destructive command refused: agent behavior), `harness` (the sandbox's argument checks: not the CLI's fault), `budget`.
 
@@ -355,7 +357,7 @@ Each milestone ends with something runnable. Stop after each one for review.
 - Done when: a full run leaves the workspace exactly as it started, verified by listing.
 
 **M4: Fan out + grade + report**
-- Done so far: `report` (sections above) over existing run folders.
+- Done so far: `report` (sections above, markdown + HTML viewer) over existing run folders, written and opened automatically at the end of `run`.
 - Replace the sequential loop with Send; add parallel graders, the report (with the arm comparison), and dispute → regrade.
 - Done when: `report.md` shows blind spots first and repeats ran concurrently (visible as shared step numbers in traces).
 
@@ -391,7 +393,8 @@ tester/
   budget.py          # process-level cost meter (M3)
   graders.py         # (M4)
   manifest.py        # (M3)
-  report.py          # report.md from run folders (M4)
+  report.py          # report data, markdown, HTML (M4)
+  report.html        # report viewer template (data embedded at write time)
   prompts/           # classifier.md, generator.md, tester.md, report.md
 classifications.yaml # human-reviewed overrides
 tests/

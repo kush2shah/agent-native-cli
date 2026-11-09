@@ -9,6 +9,7 @@ skipped with --no-llm.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from collections import defaultdict
@@ -277,7 +278,172 @@ def suggest_fixes(model, groups: list[Group], big: list[dict], inv: Inventory) -
     return [f for f in parsed.findings if 0 <= f.group < len(groups)]
 
 
-# --- rendering --------------------------------------------------------------
+# --- report data (one dict, rendered as markdown and as HTML) ---------------
+
+MAX_EVENT_CHARS = 6000  # per transcript event in the HTML view; the full text stays in workers/*.jsonl
+
+
+def label_of(r: dict) -> str:
+    return f"{r['task_id']}/{r['arm']}/r{r['repeat']}"
+
+
+def transcript_events(path: Path) -> list[dict]:
+    """A worker transcript as display events: task, thinking, text, tool (with status), answer."""
+    if not path.exists():
+        return []
+    events = []
+    for line in path.read_text().splitlines():
+        e = json.loads(line)
+        if e["event"] == "start":
+            events.append({"type": "task", "text": e.get("prompt", "")})
+        elif e["event"] == "model":
+            content = e.get("content")
+            blocks = content if isinstance(content, list) else [{"type": "text", "text": content or ""}]
+            for b in blocks:
+                if b.get("type") in ("thinking", "text") and (b.get(b["type"]) or b.get("text")):
+                    events.append({"type": b["type"], "text": (b.get(b["type"]) or b.get("text"))[:MAX_EVENT_CHARS]})
+        elif e["event"] == "tool":
+            out = str(e.get("output", ""))
+            if out.startswith("DENIED"):
+                status = "denied"
+            elif out.startswith("exit code: 0"):
+                status = "ok"
+            else:
+                status = "error"
+            args = e.get("args", "")
+            try:
+                parsed = ast.literal_eval(args) if isinstance(args, str) else args
+                args = parsed.get("args", parsed) if isinstance(parsed, dict) else parsed
+            except (ValueError, SyntaxError):
+                pass
+            events.append({"type": "tool", "name": e.get("name", ""), "args": args, "status": status,
+                           "output": out[:MAX_EVENT_CHARS], "truncated": len(out) > MAX_EVENT_CHARS})
+        elif e["event"] == "end":
+            events.append({"type": "answer", "text": e.get("final_answer", ""), "stop": e.get("stop_reason", "")})
+    return events
+
+
+def compute(runs: list[Run], inv: Inventory, groups: list[Group], big: list[dict],
+            findings: list[Finding] | None, transcripts: bool = True) -> dict:
+    results = [(run, r) for run in runs for r in run.results]
+    all_calls = [c for run in runs for c in run.commands]
+    counts = defaultdict(int)
+    for c in all_calls:
+        counts[kind(c)] += 1
+    failed = counts["cli_error"] + counts["invented_subcommand"]
+
+    friction = [{
+        "n": i + 1, "path": g.path, "signature": g.signature, "stream": g.stream, "recovered": g.recovered,
+        "workers": len(g.workers), "invented_flag": bool(INVENTED_FLAG.search(g.signature)),
+        "calls": [{"worker": run.worker(c["label"]), "argv": c["argv"],
+                   "error": "\n".join(error_lines(c)[0] if c.get("allowed") else [c.get("reason", "")])[:600]}
+                  for run, c in g.calls],
+    } for i, g in enumerate(groups)]
+
+    fixes = None
+    if findings is not None:
+        merged: dict[str, list[Finding]] = defaultdict(list)  # one entry per fix, however many groups it covers
+        for f in findings:
+            merged[f.fix_id.strip().lower()].append(f)
+        ranked = sorted(merged.values(), key=lambda fs: -sum(len(groups[f.group].calls) for f in fs))
+        fixes = []
+        for n, fs in enumerate(ranked, 1):
+            fs.sort(key=lambda f: -len(groups[f.group].calls))
+            fixes.append({
+                "n": n, "change": fs[0].change, "owner": fs[0].owner, "tenet": fs[0].tenet,
+                "tenet_name": TENETS.get(fs[0].tenet, fs[0].tenet).split(":")[0],
+                "groups": [f.group + 1 for f in fs],
+                "calls": sum(len(groups[f.group].calls) for f in fs),
+                "workers": len(set().union(*(groups[f.group].workers for f in fs))),
+                "problems": [{"group": f.group + 1, "problem": f.problem, "argv": groups[f.group].examples(1)[0]["argv"],
+                              "signature": groups[f.group].signature} for f in fs],
+            })
+
+    traps = [{"worker": run.worker(label_of(r)), "run": run.run_id, "task": r["task_id"], "arm": r["arm"],
+              "passed": bool(r.get("passed")), "tried": risky_attempts(run, r), "answer": r.get("final_answer", ""),
+              "prompt": r.get("prompt", "")}
+             for run, r in results if r.get("expected") == "ask_or_refuse"]
+
+    scorecard = []
+    for run in runs:
+        best = baselines(run.results)
+        for r in sorted(run.results, key=lambda r: (r["task_id"], r["arm"], r["repeat"])):
+            scorecard.append({
+                "worker": run.worker(label_of(r)), "run": run.run_id, "task": r["task_id"], "tier": r["tier"],
+                "arm": r["arm"], "repeat": r["repeat"], "expected": r.get("expected"), "passed": r.get("passed"),
+                "calls": r["cli_calls"], "help": r["help_calls"], "failed": failed_calls(run, r),
+                "excess": r["cli_calls"] - best[r["task_id"]] if r["task_id"] in best and r.get("passed") else None,
+                "stop": r["stop_reason"], "cost": r.get("cost_usd", 0), "docs_calls": r.get("docs_calls", 0),
+                "prompt": r.get("prompt", ""), "checks": r.get("checks", []),
+            })
+
+    by_arm = defaultdict(list)
+    for _, r in results:
+        by_arm[r["arm"]].append(r)
+    arms = [{"arm": arm, "passed": sum(1 for r in rs if r.get("passed")), "total": len(rs),
+             "mean_calls": round(mean(r["cli_calls"] for r in rs), 1),
+             "mean_help": round(mean(r["help_calls"] for r in rs), 1),
+             "docs_calls": sum(r.get("docs_calls", 0) for r in rs),
+             "cost": round(sum(r.get("cost_usd", 0) for r in rs), 4)} for arm, rs in sorted(by_arm.items())]
+    split = defaultdict(dict)
+    for run, r in results:
+        split[(run.run_id, r["task_id"])].setdefault(r["arm"], []).append(bool(r.get("passed")))
+    disagree = [f"{rid} {t}" for (rid, t), v in split.items() if len({all(x) for x in v.values()}) > 1]
+
+    caveats = []
+    if counts["harness"]:
+        reasons = sorted({signature(c, "") for c in all_calls if kind(c) == "harness"})
+        caveats.append(f"{counts['harness']} calls were denied by the tester's own sandbox, not the CLI: "
+                       + "; ".join(reasons[:3]) + ". Check these aren't false positives.")
+    if counts["budget"]:
+        caveats.append(f"{counts['budget']} calls hit the per-task call budget.")
+    stops = [f"{run.run_id} {r['task_id']}/{r['arm']} ({r['stop_reason']})" for run, r in results
+             if r.get("stop_reason") != "answered"]
+    if stops:
+        caveats.append("Stopped before answering: " + ", ".join(stops) + ".")
+    for run in runs:
+        if run.reset is None:
+            caveats.append(f"{run.run_id} has no reset.json: the workspace may still hold its objects.")
+        elif not run.reset.get("listing", {}).get("clean"):
+            caveats.append(f"{run.run_id}'s reset didn't leave the workspace clean: {json.dumps(run.reset.get('listing'))}.")
+    caveats.append("The plan generator and the worker are the same model; results that look clean may share its blind spots.")
+
+    data = {
+        "runs": [r.run_id for r in runs],
+        "cli_version": inv.data.get("cli_version", "unknown CLI version"),
+        "summary": {
+            "workers": len(results), "calls": len(all_calls), "help": counts["help"], "failed": failed,
+            "work_calls": sum(counts[k] for k in ("ok", "cli_error", "invented_subcommand", "permission")),
+            "cost": round(sum(r.get("cost_usd", 0) for _, r in results), 4),
+            "invented_subcommands": counts["invented_subcommand"],
+            "invented_flags": sum(len(f["calls"]) for f in friction if f["invented_flag"]),
+            "stdout_groups": [f["n"] for f in friction if f["stream"] == "stdout"],
+            "traps_acted": sum(1 for t in traps if not t["passed"]),
+        },
+        "not_tested": not_tested(inv, runs),
+        "friction": friction,
+        "oversized": big,
+        "fixes": fixes,
+        "findings": [f.model_dump() for f in findings] if findings is not None else None,
+        "traps": traps,
+        "scorecard": scorecard,
+        "arms": arms,
+        "docs_runs": len(by_arm.get("docs", [])),
+        "docs_unused": bool(by_arm.get("docs")) and not any(r.get("docs_calls") for r in by_arm["docs"]),
+        "disagree": disagree,
+        "caveats": caveats,
+        "tenets": TENETS,
+        "max_tool_output": MAX_TOOL_OUTPUT,
+    }
+    if transcripts:
+        data["transcripts"] = {
+            run.worker(label_of(r)): transcript_events(
+                run.path / "workers" / f"{r['task_id']}-{r['arm']}-r{r['repeat']}.jsonl")
+            for run, r in results}
+    return data
+
+
+# --- markdown ---------------------------------------------------------------
 
 
 def _plural(n: int, word: str) -> str:
@@ -300,27 +466,14 @@ def _by_group(paths: list[str]) -> str:
     return "\n".join(f"- **{top}**: {', '.join(rest)}" for top, rest in sorted(grouped.items()))
 
 
-def render(runs: list[Run], inv: Inventory, groups: list[Group], big: list[dict],
-           findings: list[Finding] | None) -> str:
-    results = [(run, r) for run in runs for r in run.results]
-    workers = len(results)
-    cost = sum(r.get("cost_usd", 0) for _, r in results)
-    all_calls = [c for run in runs for c in run.commands]
-    counts = defaultdict(int)
-    for c in all_calls:
-        counts[kind(c)] += 1
-    failed = counts["cli_error"] + counts["invented_subcommand"]
-    work_calls = sum(counts[k] for k in ("ok", "cli_error", "invented_subcommand", "permission"))
-    nt = not_tested(inv, runs)
+def render_md(d: dict) -> str:
+    s, nt = d["summary"], d["not_tested"]
     lines = [
-        f"# CLI agent-usability report: {', '.join(r.run_id for r in runs)}",
-        "",
-        f"{inv.data.get('cli_version', 'unknown CLI version')}. {workers} worker runs, {len(all_calls)} CLI calls "
-        f"({counts['help']} help lookups), {failed} failed, ${cost:.2f} in worker model cost.",
-        "",
+        f"# CLI agent-usability report: {', '.join(d['runs'])}", "",
+        f"{d['cli_version']}. {s['workers']} worker runs, {s['calls']} CLI calls ({s['help']} help lookups), "
+        f"{s['failed']} failed, ${s['cost']:.2f} in worker model cost.", "",
     ]
 
-    # 1. Not tested
     lines += ["## 1. Not tested", ""]
     if nt["blind_spots"]:
         lines += ["**Blind spots** (the key couldn't run these, so nothing here says whether they work):",
@@ -330,152 +483,99 @@ def render(runs: list[Run], inv: Inventory, groups: list[Group], big: list[dict]
     lines += [
         f"**Coverage:** {nt['reads_total'] - len(nt['reads_untested'])} of {nt['reads_total']} read commands and "
         f"{nt['writes_total'] - len(nt['writes_untested'])} of {nt['writes_total']} write commands were exercised. "
-        f"The {nt['destructive_total']} destructive commands are never run by workers.",
-        "",
+        f"The {nt['destructive_total']} destructive commands are never run by workers.", "",
         f"<details><summary>{len(nt['reads_untested'])} read commands never exercised</summary>",
         "", _by_group(nt["reads_untested"]), "", "</details>", "",
     ]
 
-    # 2. Friction
     lines += ["## 2. Friction: where agents wasted calls", ""]
-    if groups:
+    if d["friction"]:
         lines += [
-            f"{failed} of {work_calls} non-help calls failed ({failed / max(work_calls, 1):.0%}). "
+            f"{s['failed']} of {s['work_calls']} non-help calls failed ({s['failed'] / max(s['work_calls'], 1):.0%}). "
             "Grouped by command and error, with names and numbers normalized:", "",
             "| # | Failed calls | Workers | Same command later worked | Command | Error |",
             "|---|---|---|---|---|---|",
         ]
-        for i, g in enumerate(groups):
-            lines.append(f"| {i + 1} | {len(g.calls)} | {len(g.workers)} | {g.recovered}/{len(g.calls)} | "
-                         f"`{g.path}` | {_cell(g.signature)} |")
+        for f in d["friction"]:
+            lines.append(f"| {f['n']} | {len(f['calls'])} | {f['workers']} | {f['recovered']}/{len(f['calls'])} | "
+                         f"`{f['path']}` | {_cell(f['signature'])} |")
         lines.append("")
-        invented = [g for g in groups if INVENTED_FLAG.search(g.signature)]
-        on_stdout = [g for g in groups if g.stream == "stdout"]
         notes = []
-        if counts["invented_subcommand"]:
-            notes.append(f"{counts['invented_subcommand']} {_plural(counts['invented_subcommand'], 'call')} used a subcommand that doesn't exist "
+        if s["invented_subcommands"]:
+            n = s["invented_subcommands"]
+            notes.append(f"{n} {_plural(n, 'call')} used a subcommand that doesn't exist "
                          "(the real CLI prints help and exits 0 for these, so the agent can't tell).")
-        if invented:
-            n = sum(len(g.calls) for g in invented)
+        if s["invented_flags"]:
+            n = s["invented_flags"]
             notes.append(f"{n} {_plural(n, 'call')} used a flag the CLI rejected.")
-        if on_stdout:
-            which = ", ".join(str(groups.index(g) + 1) for g in on_stdout)
-            notes.append(f"{'Groups' if len(on_stdout) > 1 else 'Group'} {which} printed the error on stdout; "
+        if s["stdout_groups"]:
+            which = ", ".join(map(str, s["stdout_groups"]))
+            notes.append(f"{'Groups' if len(s['stdout_groups']) > 1 else 'Group'} {which} printed the error on stdout; "
                          "stderr held only a \"report CLI friction\" tip.")
         lines += [f"- {n}" for n in notes] + ([""] if notes else [])
     else:
         lines += ["No failed calls.", ""]
-    if big:
-        lines += [f"**Oversized output:** {len(big)} successful calls returned more than the agent's "
-                  f"{MAX_TOOL_OUTPUT:,}-character window, so it saw a truncated result:", ""]
-        lines += [f"- {_cmd(o['argv'])}: {o['chars']:,} chars" for o in big[:5]] + [""]
+    if d["oversized"]:
+        lines += [f"**Oversized output:** {len(d['oversized'])} successful calls returned more than the agent's "
+                  f"{d['max_tool_output']:,}-character window, so it saw a truncated result:", ""]
+        lines += [f"- {_cmd(o['argv'])}: {o['chars']:,} chars" for o in d["oversized"][:5]] + [""]
 
-    # 3. Suggested changes
     lines += ["## 3. Suggested changes", ""]
-    if findings is None:
+    if d["fixes"] is None:
         lines += ["Skipped (`--no-llm`).", ""]
-    elif not findings:
+    elif not d["fixes"]:
         lines += ["Nothing to suggest.", ""]
-    else:
-        merged: dict[str, list[Finding]] = defaultdict(list)  # one entry per fix, however many groups it covers
-        for f in findings:
-            merged[f.fix_id.strip().lower()].append(f)
-        ranked = sorted(merged.items(), key=lambda kv: -sum(len(groups[f.group].calls) for f in kv[1]))
-        for n, (_, fs) in enumerate(ranked, 1):
-            fs.sort(key=lambda f: -len(groups[f.group].calls))
-            change = fs[0].change
-            calls = sum(len(groups[f.group].calls) for f in fs)
-            workers = len(set().union(*(groups[f.group].workers for f in fs)))
-            tenet = TENETS.get(fs[0].tenet, fs[0].tenet).split(":")[0]
-            nums = ", ".join(str(f.group + 1) for f in fs)
-            lines += [f"**{n}. {change}**", "",
-                      f"Owner: {fs[0].owner}. Tenet: {tenet}. Friction {'groups' if len(fs) > 1 else 'group'} "
-                      f"{nums}: {calls} failed {_plural(calls, 'call')} by {workers} {_plural(workers, 'worker')}.", ""]
-            for f in fs:
-                g = groups[f.group]
-                ex = g.examples(1)[0]
-                lines += [f"- {f.problem}", f"  - e.g. {_cmd(ex['argv'])} → {_cell(g.signature)}"]
-            lines.append("")
+    for fx in d["fixes"] or []:
+        nums = ", ".join(map(str, fx["groups"]))
+        lines += [f"**{fx['n']}. {fx['change']}**", "",
+                  f"Owner: {fx['owner']}. Tenet: {fx['tenet_name']}. Friction "
+                  f"{'groups' if len(fx['groups']) > 1 else 'group'} {nums}: {fx['calls']} failed "
+                  f"{_plural(fx['calls'], 'call')} by {fx['workers']} {_plural(fx['workers'], 'worker')}.", ""]
+        for p in fx["problems"]:
+            lines += [f"- {p['problem']}", f"  - e.g. {_cmd(p['argv'])} → {_cell(p['signature'])}"]
+        lines.append("")
 
-    # 4. Behavior on risky requests
-    traps = [(run, r) for run, r in results if r.get("expected") == "ask_or_refuse"]
     lines += ["## 4. Behavior on risky requests", ""]
-    if traps:
-        failed_traps = [x for x in traps if not x[1].get("passed")]
-        lines += [f"{len(failed_traps)} of {len(traps)} trap runs acted without asking first.", ""]
-        for run, r in traps:
-            verdict = "asked or refused" if r.get("passed") else "acted"
-            tried = "; ".join(_cmd(a) for a in risky_attempts(run, r)) or "nothing risky"
-            lines += [f"- **{run.run_id} {r['task_id']} / {r['arm']}: {verdict}.** Tried: {tried}.",
-                      f"  > {_cell(r.get('final_answer', '')[:240])}…"]
+    if d["traps"]:
+        lines += [f"{s['traps_acted']} of {len(d['traps'])} trap runs acted without asking first.", ""]
+        for t in d["traps"]:
+            verdict = "asked or refused" if t["passed"] else "acted"
+            tried = "; ".join(_cmd(a) for a in t["tried"]) or "nothing risky"
+            lines += [f"- **{t['run']} {t['task']} / {t['arm']}: {verdict}.** Tried: {tried}.",
+                      f"  > {_cell(t['answer'][:240])}…"]
         lines.append("")
     else:
         lines += ["No trap tasks in these runs.", ""]
 
-    # 5. Scorecard
     lines += ["## 5. Scorecard", "",
               "Calls are CLI calls; **excess** is calls beyond the fewest any passing worker needed for that task "
               "(a weak baseline with one repeat per arm).", "",
               "| Run | Task | Tier | Arm | Verdict | Calls | Help | Failed | Excess | Stop |",
               "|---|---|---|---|---|---|---|---|---|---|"]
-    for run in runs:
-        best = baselines(run.results)
-        for r in sorted(run.results, key=lambda r: (r["task_id"], r["arm"], r["repeat"])):
-            verdict = {True: "pass", False: "**FAIL**", None: "unscored"}[r.get("passed")]
-            excess = r["cli_calls"] - best[r["task_id"]] if r["task_id"] in best and r.get("passed") else "–"
-            lines.append(f"| {run.run_id} | {r['task_id']} | {r['tier']} | {r['arm']} | {verdict} | {r['cli_calls']} | "
-                         f"{r['help_calls']} | {failed_calls(run, r)} | {excess} | {r['stop_reason']} |")
+    for r in d["scorecard"]:
+        verdict = {True: "pass", False: "**FAIL**", None: "unscored"}[r["passed"]]
+        excess = "–" if r["excess"] is None else r["excess"]
+        lines.append(f"| {r['run']} | {r['task']} | {r['tier']} | {r['arm']} | {verdict} | {r['calls']} | "
+                     f"{r['help']} | {r['failed']} | {excess} | {r['stop']} |")
     lines.append("")
-    for run, r in results:
-        for ch in r.get("checks", []):
+    for r in d["scorecard"]:
+        for ch in r["checks"]:
             if not ch.get("passed"):
-                lines.append(f"- {run.run_id} {r['task_id']}/{r['arm']} failed check: {ch['describe']}")
+                lines.append(f"- {r['run']} {r['task']}/{r['arm']} failed check: {ch['describe']}")
     lines.append("")
 
-    # 6. Arms
     lines += ["## 6. Arms", "", "| Arm | Passed | Mean calls | Mean help | Docs calls | Cost |", "|---|---|---|---|---|---|"]
-    arms = defaultdict(list)
-    for _, r in results:
-        arms[r["arm"]].append(r)
-    for arm, rs in sorted(arms.items()):
-        passed = sum(1 for r in rs if r.get("passed"))
-        lines.append(f"| {arm} | {passed}/{len(rs)} | {mean(r['cli_calls'] for r in rs):.1f} | "
-                     f"{mean(r['help_calls'] for r in rs):.1f} | {sum(r.get('docs_calls', 0) for r in rs)} | "
-                     f"${sum(r.get('cost_usd', 0) for r in rs):.2f} |")
+    for a in d["arms"]:
+        lines.append(f"| {a['arm']} | {a['passed']}/{a['total']} | {a['mean_calls']:.1f} | {a['mean_help']:.1f} | "
+                     f"{a['docs_calls']} | ${a['cost']:.2f} |")
     lines.append("")
-    docs_runs = arms.get("docs", [])
-    if docs_runs and not any(r.get("docs_calls") for r in docs_runs):
-        lines += [f"The docs arm never searched the docs ({len(docs_runs)} runs), so these runs can't separate "
+    if d["docs_unused"]:
+        lines += [f"The docs arm never searched the docs ({d['docs_runs']} runs), so these runs can't separate "
                   "CLI failures from docs failures.", ""]
-    split = defaultdict(dict)
-    for run, r in results:
-        split[(run.run_id, r["task_id"])].setdefault(r["arm"], []).append(bool(r.get("passed")))
-    disagree = [k for k, v in split.items() if len({all(x) for x in v.values()}) > 1]
-    if disagree:
-        lines += ["Arms disagreed on: " + ", ".join(f"{rid} {t}" for rid, t in disagree) + ".", ""]
+    if d["disagree"]:
+        lines += ["Arms disagreed on: " + ", ".join(d["disagree"]) + ".", ""]
 
-    # 7. Caveats
-    lines += ["## 7. Caveats", ""]
-    caveats = []
-    if counts["harness"]:
-        harness = [c for c in all_calls if kind(c) == "harness"]
-        reasons = sorted({signature(c, "") for c in harness})
-        caveats.append(f"{counts['harness']} calls were denied by the tester's own sandbox, not the CLI: "
-                       + "; ".join(reasons[:3]) + ". Check these aren't false positives.")
-    if counts["budget"]:
-        caveats.append(f"{counts['budget']} calls hit the per-task call budget.")
-    stops = [f"{run.run_id} {r['task_id']}/{r['arm']} ({r['stop_reason']})" for run, r in results
-             if r.get("stop_reason") != "answered"]
-    if stops:
-        caveats.append("Stopped before answering: " + ", ".join(stops) + ".")
-    for run in runs:
-        listing = (run.reset or {}).get("listing", {})
-        if run.reset is None:
-            caveats.append(f"{run.run_id} has no reset.json: the workspace may still hold its objects.")
-        elif not listing.get("clean"):
-            caveats.append(f"{run.run_id}'s reset didn't leave the workspace clean: {json.dumps(listing)}.")
-    caveats.append("The plan generator and the worker are the same model; results that look clean may share its blind spots.")
-    lines += [f"- {c}" for c in caveats] + [""]
+    lines += ["## 7. Caveats", ""] + [f"- {c}" for c in d["caveats"]] + [""]
     return "\n".join(lines)
 
 
@@ -484,13 +584,22 @@ def build_report(run_dirs: list[Path], inv: Inventory, model=None) -> tuple[str,
     groups = friction_groups(runs)
     big = oversized(runs)
     findings = suggest_fixes(model, groups, big, inv) if model is not None else None
-    md = render(runs, inv, groups, big, findings)
-    data = {
-        "runs": [r.run_id for r in runs],
-        "not_tested": not_tested(inv, runs),
-        "friction": [{"path": g.path, "signature": g.signature, "calls": len(g.calls), "workers": len(g.workers),
-                      "recovered": g.recovered, "stream": g.stream, "examples": g.examples()} for g in groups],
-        "oversized": big,
-        "findings": [f.model_dump() for f in findings] if findings is not None else None,
-    }
-    return md, data
+    data = compute(runs, inv, groups, big, findings)
+    return render_md(data), data
+
+
+def render_html(d: dict) -> str:
+    """The interactive viewer: the template with the report data embedded (no network needed)."""
+    payload = json.dumps(d).replace("</", "<\\/")  # can't close the script tag early
+    return (Path(__file__).parent / "report.html").read_text().replace("/*__DATA__*/", payload)
+
+
+def write_report(run_dirs: list[Path], inv: Inventory, out: Path, model=None) -> Path:
+    """Write <out>.md, <out>.html and <out>.json; returns the HTML path."""
+    md, data = build_report(run_dirs, inv, model)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.with_suffix(".md").write_text(md)
+    out.with_suffix(".html").write_text(render_html(data))
+    slim = {k: v for k, v in data.items() if k != "transcripts"}  # transcripts already live in workers/
+    out.with_suffix(".json").write_text(json.dumps(slim, indent=2))
+    return out.with_suffix(".html")

@@ -98,7 +98,7 @@ def test_report_sections_without_model(tmp_path):
     assert "`langsmith projects delete --project-id abc`" in md
     assert "| rx1 | t01 | medium | docs | pass | 6 | 1 | 1 | 3 | answered |" in md  # excess over t01/help's 3
     assert "denied by the tester's own sandbox" in md
-    assert data["findings"] is None and data["friction"][0]["calls"] == 2
+    assert data["findings"] is None and len(data["friction"][0]["calls"]) == 2
 
 
 def test_findings_sharing_a_fix_are_merged(tmp_path):
@@ -116,3 +116,27 @@ def test_findings_sharing_a_fix_are_merged(tmp_path):
     assert "**2. Document the limit.**" in section and "Help matches behavior" in section
     assert "Out of range" not in section
     assert len(data["findings"]) == 3
+
+
+def test_html_report_embeds_data_and_transcripts(tmp_path):
+    from tester.report import write_report
+
+    run = write_run(tmp_path)
+    (run / "workers").mkdir()
+    (run / "workers" / "t01-help-r1.jsonl").write_text("\n".join(json.dumps(e) for e in [
+        {"event": "start", "prompt": "find </script> prompt"},
+        {"event": "model", "content": [{"type": "thinking", "thinking": "hmm"}, {"type": "tool_use"}]},
+        {"event": "tool", "name": "run_cli", "args": "{'args': ['prompt', 'pull', 'x']}", "output": "exit code: 1\nstderr:\nbad"},
+        {"event": "tool", "name": "run_cli", "args": "{'args': ['projects', 'delete']}", "output": "DENIED by policy: no"},
+        {"event": "end", "final_answer": "done", "stop_reason": "answered"}]))
+    html = write_report([run], inventory(), tmp_path / "out" / "report")
+    text = html.read_text()
+    assert html.name == "report.html" and (tmp_path / "out" / "report.md").exists()
+    assert "/*__DATA__*/" not in text and "find <\\/script> prompt" in text  # can't break out of the data tag
+    data = json.loads(text.split('type="application/json">', 1)[1].split("</script>", 1)[0])
+    events = data["transcripts"]["rx1:t01/help/r1"]
+    assert [e["type"] for e in events] == ["task", "thinking", "tool", "tool", "answer"]
+    assert events[2]["args"] == ["prompt", "pull", "x"] and events[2]["status"] == "error"
+    assert events[3]["status"] == "denied"
+    assert data["transcripts"]["rx1:t02/help/r1"] == []  # missing transcript is fine
+    assert "transcripts" not in json.loads((tmp_path / "out" / "report.json").read_text())
