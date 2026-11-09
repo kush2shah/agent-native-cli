@@ -129,8 +129,8 @@ class FakeClient:
 
     def create_examples(self, dataset_id, examples):
         rows = [{"id": str(uuid.uuid4()), **e} for e in examples]
-        self.examples.setdefault(str(dataset_id), []).extend(rows)
-        return {"count": len(rows), "example_ids": [r["id"] for r in rows]}
+        self.examples.setdefault(str(dataset_id), []).extend(reversed(rows))  # like the API: not in input order
+        return {"count": len(rows), "example_ids": sorted(r["id"] for r in rows)}
 
     def push_prompt(self, name, object=None, description=None):
         self.calls.append(f"push_prompt {name}")

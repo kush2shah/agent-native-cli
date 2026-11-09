@@ -210,16 +210,22 @@ class HarnessExecutor:
         self._mark_seeded("agent", name)
         return aid
 
-    def create_experiment(self, name: str, data: dict, dataset_name: str, created_by: str = "seed",
-                          timeout_s: float = 180) -> str:
-        """An experiment: a project tied to a seeded dataset, one run per row, with evaluator scores."""
+    def create_experiment(self, name: str, data: dict, dataset_name: str, dataset_inputs: list[dict],
+                          created_by: str = "seed", timeout_s: float = 180) -> str:
+        """An experiment: a project tied to a seeded dataset, one run per row, with evaluator scores.
+
+        `dataset_inputs` are the dataset's example inputs in seed order. Rows refer to examples by
+        that order, so each is matched to its example by inputs: neither the create response nor
+        a listing returns examples in seed order.
+        """
         ds_entry = self.manifest.find("dataset", dataset_name)
         if not ds_entry or not ds_entry.get("seeded"):
             raise HarnessError(f"experiment {name!r}: dataset {dataset_name!r} isn't seeded")
         examples = {str(e.id): e for e in self.client.list_examples(dataset_id=ds_entry["id"])}
-        example_ids = ds_entry.get("example_ids") or []
-        if sorted(example_ids) != sorted(examples):  # the create response had no IDs; fall back to listing order
-            example_ids = list(examples)
+        by_inputs = {json.dumps(e.inputs, sort_keys=True): ex_id for ex_id, e in examples.items()}
+        example_ids = [by_inputs.get(json.dumps(i, sort_keys=True)) for i in dataset_inputs]
+        if None in example_ids:
+            raise HarnessError(f"experiment {name!r}: couldn't match every seeded example of {dataset_name!r}")
 
         def make() -> str:
             p = self.client.create_project(name, description=data.get("description") or None,

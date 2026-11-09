@@ -185,6 +185,13 @@ def test_file_references_and_escaping_paths_denied(cfg, inventory, argv):
     assert res.exit_code is None
 
 
+def test_single_segment_slash_token_is_allowed(runner):
+    # agents address private prompts as "/name"; that must reach the CLI, not our sandbox
+    assert runner.run(["datasets", "get", "/ct1-prompt"]).allowed
+    assert not runner.run(["datasets", "get", "/etc/passwd"]).allowed
+    assert not runner.run(["datasets", "get", "/"]).allowed
+
+
 def test_relative_output_path_allowed(runner):
     res = runner.run(["datasets", "list", "-o", "out.json"])
     assert res.allowed

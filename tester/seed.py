@@ -223,4 +223,6 @@ def apply_seed(ex: HarnessExecutor, seed_data: list[dict], run_id: str, log=prin
         elif s["kind"] == "agent":
             ex.create_agent_with_runs(name, s["data"])
         elif s["kind"] == "experiment":
-            ex.create_experiment(name, s["data"], real(s["data"]["dataset"]))
+            ds = next(d for d in seed_data if d["kind"] == "dataset" and d["name"] == s["data"]["dataset"])
+            inputs = [json.loads(e["inputs_json"]) for e in ds["data"]["examples"]]
+            ex.create_experiment(name, s["data"], real(s["data"]["dataset"]), inputs)

@@ -83,7 +83,9 @@ def _bad_arg(tok: str) -> str | None:
     if tok.startswith("-") and "=" in tok:
         values.append(tok.split("=", 1)[1])
     for v in values:
-        if v.startswith(("/", "~")):
+        # A single-segment "/name" is allowed: it's how agents try to address private prompts
+        # (owner "-" or empty), and it can't reach anything outside "/" itself.
+        if v.startswith("~") or (v.startswith("/") and "/" in v[1:]) or v == "/":
             return f"absolute or home paths are not allowed: {tok!r}"
         if ".." in Path(v).parts:
             return f"paths may not contain `..`: {tok!r}"

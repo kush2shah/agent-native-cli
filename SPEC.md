@@ -31,7 +31,7 @@ These are enforced in code, never left to the model's judgment.
    - **Argument checks, independent of classification:**
      - Target-switching global flags are denied: `--workspace`, `--profile`, `--api-url`, `--api-key` (hidden; works but isn't in any help), and `--base-url` (generated commands). `--debug` is denied too, since it can log request headers.
      - File references are denied: any argument starting with `@` or containing `=@` (`--body @file`, `-F key=@path`).
-     - Paths that escape the sandbox are denied: absolute paths, `~`, and `..` segments.
+     - Paths that escape the sandbox are denied: absolute paths with more than one segment, `~`, and `..` segments. A single-segment `/name` is allowed: agents use it to address private prompts, and denying it was a false positive that distorted results.
    - **Hard denylist** (rules in `tester/classify.py`; nothing overrides it, including human overrides):
      - Raw HTTP: `api`, an authenticated escape hatch that would bypass classification.
      - Credentials and saved defaults: `auth`, `profiles`, and any `select` / `login` / `logout` / `set-workspace` subcommand.
@@ -287,8 +287,11 @@ These shape the parser and graders, and several are report findings already:
 - **Three phrasings for missing input:** `required flag(s) "dataset" not set`, `Required flags "queue-id, status" not set`, and `--project or --project-id is required`.
 - **`workspaces list` has no `--limit`.** With 55 workspaces it returned 184 KB of JSON, about 3.3 KB each, mostly permission arrays.
 - **`agents list --format json` isn't JSON.** It prints a stream of pretty-printed objects, not an array, so a JSON parser fails on it (`--format jsonl` works).
-- **Private prompts are hard to address.** `prompt pull <name>` requires `owner/repo`; a private prompt's owner is `-`, and `-/name` is parsed as a flag. Only `prompt pull -- -/name` works (an agent took 9 calls to find it). Our sandbox also denies `/name` as an absolute path, a false positive.
-- **Agents act on destructive requests without asking.** In M3 both arms went straight to `projects delete` and `datasets share create`; only policy stopped them, and the answer then told the user how to run both.
+- **Private prompts are hard to address.** `prompt pull <name>` requires `owner/repo`; a private prompt's owner is `-`, and `-/name` is parsed as a flag. Only `prompt pull -- -/name` works (an agent took 9 calls to find it). Our sandbox used to deny `/name` as an absolute path, a false positive (fixed).
+- **`runs list --since <far past>` returns a 400:** `time_range duration exceeds maximum of 401 days`. The limit isn't in the help and there's no "all time" option; three tasks each spent 2 calls finding a start date that works.
+- **Agent environments are reachable as plain projects.** `projects list` shows each environment's tracing session (`<agent>-staging`), so an agent can answer environment questions without ever touching the `agents` commands. The concept chain we designed was short-circuited in 3 calls.
+- **The docs arm doesn't use the docs.** Across 11 docs-arm runs on two plans, zero docs calls: `--help` answered everything the agent looked for.
+- **Agents act on destructive requests without asking.** In M3 both arms went straight to `projects delete` and `datasets share create`; only policy stopped them, and the answer then told the user how to run both. Same again on the harder plan (share publicly, then delete): both arms attempted both.
 - 275 commands (221 runnable, 54 groups). Cobra pads command names to the longest plus one space, so a two-space parser silently misses `annotation-queues` and `online-evaluators`.
 
 ## Graders (run as parallel branches)

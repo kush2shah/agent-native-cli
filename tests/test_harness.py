@@ -32,7 +32,7 @@ def test_manifest_entry_is_written_before_the_create(ex):
     assert entry["status"] == "created" and entry["id"] and entry["seeded"]
     [row] = ex.client.examples[entry["id"]]
     assert (row["inputs"], row["outputs"]) == ({"q": "capital of France?"}, {"a": "Paris"})
-    assert entry["example_ids"] == [row["id"]]
+    assert entry["example_ids"] == [row["id"]]  # recorded, though not in seed order in general
 
 
 def test_harness_only_creates_prefixed_names(ex):
@@ -137,10 +137,10 @@ def test_experiment_links_runs_to_examples_and_scores_them(ex):
          "scores": [{"key": "correctness", "score": 1, "comment": ""}]},
         {"example_index": 0, "outputs_json": '{"a": 9}', "error": "", "latency_s": 2.0,
          "scores": [{"key": "correctness", "score": 0, "comment": "wrong"}]}]}
-    ex.create_experiment("ct1-baseline", exp, "ct1-qa")
-    ids = ex.manifest.find("dataset", "ct1-qa")["example_ids"]
-    assert [r["reference_example_id"] for r in ex.client.runs] == [ids[1], ids[0]]
-    assert ex.client.runs[0]["inputs"] == {"q": "b"}
+    ex.create_experiment("ct1-baseline", exp, "ct1-qa", [{"q": "a"}, {"q": "b"}])
+    by_q = {e["inputs"]["q"]: e["id"] for e in ex.client.examples[ex.manifest.find("dataset", "ct1-qa")["id"]]}
+    assert [r["reference_example_id"] for r in ex.client.runs] == [by_q["b"], by_q["a"]]
+    assert [r["inputs"] for r in ex.client.runs] == [{"q": "b"}, {"q": "a"}]
     assert ex.client.objs["project"]["ct1-baseline"].reference_dataset_id == ex.manifest.find("dataset", "ct1-qa")["id"]
     assert [f["score"] for f in ex.client.feedback] == [1, 0]
     outcomes = ex.reset()
@@ -149,7 +149,7 @@ def test_experiment_links_runs_to_examples_and_scores_them(ex):
 
 def test_experiment_needs_its_dataset_seeded_first(ex):
     with pytest.raises(HarnessError, match="isn't seeded"):
-        ex.create_experiment("ct1-baseline", {"description": "", "dataset": "<run_id>-qa", "rows": []}, "ct1-qa")
+        ex.create_experiment("ct1-baseline", {"description": "", "dataset": "<run_id>-qa", "rows": []}, "ct1-qa", [])
 
 
 def test_a_partly_seeded_step_cannot_be_retried(tmp_path):
