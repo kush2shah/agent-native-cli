@@ -38,6 +38,12 @@ class DatasetData(BaseModel):
     examples: list[ExampleData]
 
 
+class Score(BaseModel):
+    key: str = Field(description="Feedback key, e.g. correctness, user_rating")
+    score: float
+    comment: str = Field(default="", description='Optional comment, or ""')
+
+
 class ChildRunData(BaseModel):
     name: str
     run_type: Literal["tool", "chain", "llm", "retriever"]
@@ -57,6 +63,12 @@ class RunData(BaseModel):
     start_offset_s: float = Field(description="How many seconds before now the run started")
     latency_s: float
     children: list[ChildRunData] = Field(default_factory=list)
+    metadata_json: str = Field(default="", description='JSON object of run metadata, or ""')
+    tags: list[str] = Field(default_factory=list)
+    feedback: list[Score] = Field(default_factory=list, description="Feedback scores attached to this root run")
+    repeat: int = Field(default=1, description="Create this many copies (for volume); copy k starts "
+                                               "k * repeat_spacing_s seconds earlier than the first")
+    repeat_spacing_s: float = Field(default=60.0)
 
 
 class ProjectData(BaseModel):
@@ -64,7 +76,33 @@ class ProjectData(BaseModel):
     runs: list[RunData]
 
 
-SCHEMAS = {"prompt": PromptData, "dataset": DatasetData, "project_with_runs": ProjectData}
+class EnvironmentData(BaseModel):
+    environment: Literal["local", "development", "staging", "production"]
+    runs: list[RunData] = Field(description="Root runs traced to this environment (may be empty)")
+
+
+class AgentData(BaseModel):
+    display_name: str = Field(description="Human-readable agent name")
+    environments: list[EnvironmentData] = Field(description="Environments that receive traces; all four exist anyway")
+
+
+class ExperimentRow(BaseModel):
+    example_index: int = Field(description="0-based index into the dataset's examples, in seed order")
+    outputs_json: str = Field(description='What the system under test answered (JSON object), or "" on error')
+    error: str = Field(default="", description='Error message, or ""')
+    latency_s: float
+    scores: list[Score] = Field(default_factory=list, description="Evaluator scores for this row")
+
+
+class ExperimentData(BaseModel):
+    description: str
+    dataset: str = Field(description="Name of the seeded dataset this experiment ran against (with <run_id>-)")
+    rows: list[ExperimentRow]
+
+
+SCHEMAS = {"prompt": PromptData, "dataset": DatasetData, "project_with_runs": ProjectData,
+           "agent": AgentData, "experiment": ExperimentData}
+MAX_RUNS_PER_STEP = 300  # counting repeats and child runs; keeps seeding to a few minutes
 
 MATERIALIZE_SYSTEM = """You turn a test plan's description of a seed object into the exact data that will be \
 created in a LangSmith workspace. Follow the description exactly: the same number of items, the same names, \
@@ -76,10 +114,12 @@ plain, realistic values. JSON fields must be valid JSON objects (or "" where all
 def materialize_step(model, step: dict, plan: dict) -> tuple[dict, object]:
     """Returns (data, raw model message) for one seed step."""
     schema = SCHEMAS[step["kind"]]
-    related = [t for t in plan.get("tasks", []) if step["name"] in t.get("prompt", "")]
+    related = [t for t in plan.get("tasks", []) if step["name"] in t.get("prompt", "")] or plan.get("tasks", [])
+    others = "\n".join(f"- {o['kind']} {o['name']}: {o['spec'][:300]}" for o in plan.get("seed", []) if o is not step)
     checks = "\n".join(f"- {t['id']}: {t['prompt']}\n  checks: " + "; ".join(
         f"{c['method']} {c.get('values')}" for c in t.get("hard_checks", [])) for t in related)
     user = (f"Seed object: {step['kind']} named {step['name']}\n\nDescription:\n{step['spec']}\n\n"
+            f"Other seed objects in this plan (for references, e.g. an experiment's dataset):\n{others or '(none)'}\n\n"
             f"Tasks that use it (their checks must hold against your data):\n{checks or '(none)'}")
     out = model.with_structured_output(schema, method="json_schema", include_raw=True).invoke(
         [("system", MATERIALIZE_SYSTEM), ("user", user)])
@@ -88,9 +128,25 @@ def materialize_step(model, step: dict, plan: dict) -> tuple[dict, object]:
     return out["parsed"].model_dump(), out.get("raw")
 
 
+def all_runs(kind: str, data: dict) -> list[dict]:
+    if kind == "project_with_runs":
+        return data["runs"]
+    if kind == "agent":
+        return [r for env in data["environments"] for r in env["runs"]]
+    return []
+
+
+def run_count(kind: str, data: dict) -> int:
+    if kind == "experiment":
+        return len(data["rows"])
+    return sum(r.get("repeat", 1) * (1 + len(r.get("children", []))) for r in all_runs(kind, data))
+
+
 def validate_seed_data(seed_data: list[dict]) -> list[str]:
-    """Problems that block seeding (bad JSON, empty objects)."""
+    """Problems that block seeding (bad JSON, empty objects, dangling references)."""
     errors = []
+    datasets = {s["name"]: s for s in seed_data if s["kind"] == "dataset"}
+    order = [s["name"] for s in seed_data]
     for s in seed_data:
         where = f"seed {s['id']} ({s['name']})"
         try:
@@ -98,12 +154,26 @@ def validate_seed_data(seed_data: list[dict]) -> list[str]:
         except Exception as e:
             errors.append(f"{where}: {e}")
             continue
-        items = data.get("examples") or data.get("runs") or data.get("messages") or []
-        if not items:
-            errors.append(f"{where}: no examples, runs, or messages")
+        if s["kind"] == "experiment":
+            ds = datasets.get(data["dataset"])
+            if not ds:
+                errors.append(f"{where}: dataset {data['dataset']!r} isn't a seeded dataset")
+            elif order.index(ds["name"]) > order.index(s["name"]):
+                errors.append(f"{where}: dataset {data['dataset']!r} must be seeded before the experiment")
+            else:
+                n = len(ds["data"]["examples"])
+                bad = sorted({r["example_index"] for r in data["rows"] if not 0 <= r["example_index"] < n})
+                if bad:
+                    errors.append(f"{where}: example_index {bad} out of range (dataset has {n} examples)")
+        items = (data.get("examples") or data.get("messages") or data.get("rows")
+                 or all_runs(s["kind"], data) or [])
+        if not items and s["kind"] != "agent":
+            errors.append(f"{where}: no examples, runs, rows, or messages")
+        if run_count(s["kind"], data) > MAX_RUNS_PER_STEP:
+            errors.append(f"{where}: {run_count(s['kind'], data)} runs; at most {MAX_RUNS_PER_STEP} per seed step")
         payloads = []
         for item in items:
-            payloads += [item.get("inputs_json"), item.get("outputs_json")]
+            payloads += [item.get("inputs_json"), item.get("outputs_json"), item.get("metadata_json")]
             for child in item.get("children", []):
                 payloads += [child["inputs_json"], child["outputs_json"]]
         for p in payloads:
@@ -134,8 +204,9 @@ def check_warnings(seed_data: list[dict], plan: dict) -> list[str]:
 
 
 def apply_seed(ex: HarnessExecutor, seed_data: list[dict], run_id: str, log=print) -> None:
+    real = lambda n: n.replace("<run_id>-", f"{run_id}-")  # noqa: E731
     for s in seed_data:
-        name = s["name"].replace("<run_id>-", f"{run_id}-")
+        name = real(s["name"])
         log(f"  seeding {s['kind']} {name} ...")
         if s["kind"] == "dataset":
             ex.create_dataset(name, s["data"])
@@ -143,3 +214,7 @@ def apply_seed(ex: HarnessExecutor, seed_data: list[dict], run_id: str, log=prin
             ex.create_prompt(name, s["data"])
         elif s["kind"] == "project_with_runs":
             ex.create_project_with_runs(name, s["data"])
+        elif s["kind"] == "agent":
+            ex.create_agent_with_runs(name, s["data"])
+        elif s["kind"] == "experiment":
+            ex.create_experiment(name, s["data"], real(s["data"]["dataset"]))

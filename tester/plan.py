@@ -23,9 +23,12 @@ RUN_PREFIX = "<run_id>-"
 # object, so run_cli can enforce the name prefix and write the manifest entry first.
 CREATES = {"datasets create": {"name_flag": "--name", "kind": "dataset"}}
 
-SEED_KINDS = ("dataset", "project_with_runs", "prompt")
-CHECK_METHODS = ("output_contains_all", "output_contains_any", "object_exists", "object_absent")
+SEED_KINDS = ("dataset", "project_with_runs", "prompt", "agent", "experiment")
+CHECK_METHODS = ("output_contains_all", "output_contains_any", "output_excludes", "object_exists", "object_absent")
 MIN_TASKS, MAX_TASKS = 3, 8
+MAX_ANY_VALUES = 4  # a longer list of acceptable phrasings passes nearly any answer
+MIN_VALUE_CHARS = 3
+_AGENT_ID = re.compile(r"[a-z]([a-z0-9-]{0,61}[a-z0-9])?")
 
 _NAME_REF = re.compile(r"<run_id>-[\w-]*\w")
 _CLI_SYNTAX = re.compile(r"\blangsmith\s+[a-z]|(?<![\w-])--[a-z][\w-]*")
@@ -34,7 +37,8 @@ _CLI_SYNTAX = re.compile(r"\blangsmith\s+[a-z]|(?<![\w-])--[a-z][\w-]*")
 class HardCheck(BaseModel):
     describe: str = Field(description="What the check verifies, in plain words")
     method: Literal[CHECK_METHODS] = Field(
-        description="output_contains_all/any: the agent's final answer contains the values. "
+        description="output_contains_all/any: the agent's final answer contains the values (case-insensitive). "
+        "output_excludes: it contains none of them (use for decoy values a correct answer never mentions). "
         "object_exists/object_absent: a workspace object named values[0] exists / doesn't."
     )
     values: list[str] = Field(default_factory=list)
@@ -84,6 +88,9 @@ def validate_plan(plan: dict, inventory: Inventory, docs_urls: set[str] | None =
     for s in p.seed:
         if not s.name.startswith(RUN_PREFIX) or len(s.name) <= len(RUN_PREFIX):
             errors.append(f"seed {s.id}: name {s.name!r} must start with {RUN_PREFIX!r}")
+        if s.kind == "agent" and not _AGENT_ID.fullmatch(s.name[len(RUN_PREFIX):]):
+            errors.append(f"seed {s.id}: agent name {s.name!r} needs lowercase letters, digits, and hyphens after "
+                          f"the prefix, ending in a letter or digit")
         seeded.add(s.name)
 
     for t in p.tasks:
@@ -102,6 +109,14 @@ def validate_plan(plan: dict, inventory: Inventory, docs_urls: set[str] | None =
         if t.expected == "complete" and not t.hard_checks:
             errors.append(f"{where}: expected=complete needs at least one hard check")
         for c in t.hard_checks:
+            if c.method.startswith("output_"):
+                short = [v for v in c.values if len(v.strip()) < MIN_VALUE_CHARS]
+                if short:
+                    errors.append(f"{where}: {c.method} values {short} are too short to mean anything; "
+                                  f"use a specific word or number from the seed data")
+            if c.method == "output_contains_any" and len(c.values) > MAX_ANY_VALUES:
+                errors.append(f"{where}: output_contains_any has {len(c.values)} values; at most {MAX_ANY_VALUES}. "
+                              f"Check for a specific fact instead of many phrasings")
             if c.method.startswith("object_") and len(c.values) != 1:
                 errors.append(f"{where}: {c.method} takes exactly one object name in values")
             if c.method.startswith("output_") and not c.values:

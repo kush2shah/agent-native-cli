@@ -14,6 +14,35 @@ class LangSmithNotFoundError(Exception):
     pass
 
 
+class FakeAgents:
+    """client.agents: agents with four stages, each with its own tracing session."""
+
+    STAGES = ("LOCAL", "DEVELOPMENT", "STAGING", "PRODUCTION")
+
+    def __init__(self, client):
+        self.client = client
+        self.items: dict[str, SimpleNamespace] = {}
+
+    def create(self, id, name=None):
+        self.client.calls.append(f"create_agent {id}")
+        self.client.on_create("agent", id)
+        stages = [SimpleNamespace(**{"environment": st, "tracer_session_id": str(uuid.uuid4())}) for st in self.STAGES]
+        self.items[id] = SimpleNamespace(id=id, name=name or id, environments=stages)
+        return self.items[id]
+
+    def retrieve(self, agent_id):
+        if agent_id not in self.items:
+            raise LangSmithNotFoundError("agent not found")
+        return self.items[agent_id]
+
+    def list(self):
+        return list(self.items.values())
+
+    def delete(self, agent_id):
+        self.client.calls.append(f"delete_agent {agent_id}")
+        del self.items[self.retrieve(agent_id).id]
+
+
 class FakeClient:
     """In-memory stand-in for langsmith.Client, covering what the harness executor calls.
 
@@ -30,6 +59,8 @@ class FakeClient:
         self.runs_visible_after = runs_visible_after
         self._list_runs_calls = 0
         self.on_create = lambda kind, name: None
+        self.agents = FakeAgents(self)
+        self.feedback: list[dict] = []
 
     def _sync_cli(self):
         if self.cli_state and self.cli_state.exists():
@@ -74,11 +105,21 @@ class FakeClient:
         repos = list(self.objs["prompt"].values())
         return SimpleNamespace(repos=repos[offset:offset + limit], total=len(repos))
 
-    def list_runs(self, project_name=None):
+    def list_runs(self, project_name=None, project_id=None):
         self._list_runs_calls += 1
         if self._list_runs_calls <= self.runs_visible_after:
             return []
-        return [r for r in self.runs if r["project_name"] == project_name]
+        if project_id is not None:
+            stage = next(((a.id, st.environment) for a in self.agents.items.values() for st in a.environments
+                          if st.tracer_session_id == project_id), None)
+            return [r for r in self.runs if r.get("address") and (r["address"]["id"], r["address"]["environment"]) == stage]
+        return [r for r in self.runs if r.get("project_name") == project_name]
+
+    def list_examples(self, dataset_id):
+        return [SimpleNamespace(id=e["id"], inputs=e["inputs"]) for e in self.examples.get(str(dataset_id), [])]
+
+    def create_feedback(self, run_id, key, score=None, comment=None):
+        self.feedback.append({"run_id": run_id, "key": key, "score": score})
 
     # writes
     def create_dataset(self, name, description=None, metadata=None):
@@ -87,17 +128,21 @@ class FakeClient:
         return self.add("dataset", name)
 
     def create_examples(self, dataset_id, examples):
-        self.examples.setdefault(str(dataset_id), []).extend(examples)
+        rows = [{"id": str(uuid.uuid4()), **e} for e in examples]
+        self.examples.setdefault(str(dataset_id), []).extend(rows)
+        return {"count": len(rows), "example_ids": [r["id"] for r in rows]}
 
     def push_prompt(self, name, object=None, description=None):
         self.calls.append(f"push_prompt {name}")
         self.on_create("prompt", name)
         self.add("prompt", name)
 
-    def create_project(self, name, description=None, metadata=None):
+    def create_project(self, name, description=None, metadata=None, reference_dataset_id=None):
         self.calls.append(f"create_project {name}")
         self.on_create("project", name)
-        return self.add("project", name)
+        obj = self.add("project", name)
+        obj.reference_dataset_id = reference_dataset_id
+        return obj
 
     def create_run(self, **kw):
         self.runs.append(kw)

@@ -19,6 +19,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
 from tester.budget import CostMeter
+from tester.classify import DESTRUCTIVE, WRITE
 from tester.docs_mcp import ALLOWED_TOOLS, DocsMCP
 from tester.run_cli import CliResult, CliRunner
 
@@ -196,6 +197,9 @@ def run_worker(env: WorkerEnv, system: str, prompt: str) -> dict:
         "cli_calls": len(results),
         "help_calls": sum(1 for r in results if r.decision.is_help),
         "denied": [{"argv": r.argv, "reason": r.decision.reason} for r in results if not r.allowed],
+        # Writes or destructive commands the agent tried that policy blocked: it acted instead of asking.
+        "blocked_actions": [r.argv for r in results
+                            if not r.allowed and not r.decision.is_help and r.decision.cls in (DESTRUCTIVE, WRITE)],
         "errors": sum(1 for r in results if r.allowed and r.exit_code not in (0, None)),
         "used_json_format": any(asks_for_json(r.argv) for r in results if r.allowed),
         "docs_calls": final["docs_calls"],

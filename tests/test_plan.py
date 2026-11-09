@@ -52,10 +52,38 @@ def test_good_plan_validates(inventory):
     ({"hard_checks": []}, "needs at least one hard check"),
     ({"docs_refs": ["https://docs.example/langsmith/made-up.md"]}, "isn't a page in the docs snapshot"),
     ({"hard_checks": [{"describe": "x", "method": "object_exists", "values": ["prod-dataset"]}]}, "not pre-existing data"),
+    ({"hard_checks": [{"describe": "x", "method": "output_contains_any", "values": ["4 ", "four"]}]}, "too short"),
+    ({"hard_checks": [{"describe": "x", "method": "output_contains_any", "values": ["none", "no runs", "zero",
+                                                                                  "not any", "nothing"]}]}, "at most 4"),
 ])
 def test_validation_catches(inventory, changes, expect):
     errors = validate_plan(broken(**changes), inventory, {DOCS})
     assert any(expect in e for e in errors), errors
+
+
+def test_agent_seed_names_must_be_valid_agent_ids(inventory):
+    plan = copy.deepcopy(GOOD)
+    plan["seed"].append({"id": "s02", "kind": "agent", "name": "<run_id>-Checkout_Bot", "spec": "x"})
+    assert any("agent name" in e for e in validate_plan(plan, inventory, {DOCS}))
+    plan["seed"][1]["name"] = "<run_id>-checkout-bot"
+    assert validate_plan(plan, inventory, {DOCS}) == []
+
+
+def test_planner_sees_earlier_runs_and_untested_commands(cfg, inventory, tmp_path):
+    import json
+
+    from tester.graph import prior_runs_summary
+
+    rdir = cfg.runs_dir / "old"
+    rdir.mkdir(parents=True)
+    (rdir / "results.jsonl").write_text(json.dumps({
+        "task_id": "t01", "tier": "easy", "arm": "help", "passed": True, "cli_calls": 3, "help_calls": 1,
+        "docs_calls": 0, "prompt": "What datasets do I have?"}) + "\n")
+    (rdir / "commands.jsonl").write_text(json.dumps({"allowed": True, "is_help": False, "path": "datasets list"}) + "\n")
+    text = prior_runs_summary(cfg.runs_dir, ["old", "missing"], inventory)
+    assert "t01 [easy] help: PASS, 3 CLI calls" in text
+    assert "Commands exercised so far (1): datasets list" in text
+    assert "datasets list" not in text.split("never exercised")[1]
 
 
 def test_seed_names_need_the_prefix(inventory):

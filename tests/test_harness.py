@@ -30,7 +30,9 @@ def test_manifest_entry_is_written_before_the_create(ex):
     assert seen[0][0]["name"] == "ct1-qa" and seen[0][0]["status"] == "intended"
     [entry] = ex.manifest.entries
     assert entry["status"] == "created" and entry["id"] and entry["seeded"]
-    assert ex.client.examples[entry["id"]] == [{"inputs": {"q": "capital of France?"}, "outputs": {"a": "Paris"}}]
+    [row] = ex.client.examples[entry["id"]]
+    assert (row["inputs"], row["outputs"]) == ({"q": "capital of France?"}, {"a": "Paris"})
+    assert entry["example_ids"] == [row["id"]]
 
 
 def test_harness_only_creates_prefixed_names(ex):
@@ -99,3 +101,52 @@ def test_listing_comparison_splits_ours_from_others():
     cmp = compare_listings(before, after, "ct1-")
     assert cmp == {"ours_left": ["dataset ct1-left"], "others_added": ["dataset new-theirs"],
                    "removed": ["prompt p"], "clean": False}
+
+
+AGENT = {"display_name": "Checkout", "environments": [
+    {"environment": "staging", "runs": [
+        {"name": "checkout", "run_type": "chain", "inputs_json": "{}", "outputs_json": "", "error": "CardDeclined",
+         "start_offset_s": 100, "latency_s": 1.0, "children": [], "metadata_json": '{"release": "v2"}',
+         "tags": ["canary"], "feedback": [{"key": "user_rating", "score": 0, "comment": ""}],
+         "repeat": 3, "repeat_spacing_s": 3600}]},
+    {"environment": "production", "runs": []},
+]}
+
+
+def test_agent_runs_go_to_their_environment_with_repeats_metadata_and_feedback(ex):
+    ex.create_agent_with_runs("ct1-checkout", AGENT)
+    runs = ex.client.runs
+    assert len(runs) == 3 and all(r["address"] == {"kind": "AGENT", "id": "ct1-checkout", "environment": "STAGING"}
+                                  for r in runs)
+    gaps = sorted((runs[0]["start_time"] - r["start_time"]).total_seconds() for r in runs)
+    assert gaps == [0, 3600, 7200]
+    assert runs[0]["extra"] == {"metadata": {"release": "v2"}} and runs[0]["tags"] == ["canary"]
+    assert [f["key"] for f in ex.client.feedback] == ["user_rating"] * 3
+    assert ex.manifest.find("agent", "ct1-checkout")["seeded"]
+    assert ex.reset() == [{"kind": "agent", "name": "ct1-checkout", "outcome": "deleted"}]
+    assert ex.client.agents.items == {}
+
+
+def test_experiment_links_runs_to_examples_and_scores_them(ex):
+    ds = {"description": "", "examples": [
+        {"inputs_json": '{"q": "a"}', "outputs_json": '{"a": 1}'},
+        {"inputs_json": '{"q": "b"}', "outputs_json": '{"a": 2}'}]}
+    ex.create_dataset("ct1-qa", ds)
+    exp = {"description": "baseline", "dataset": "<run_id>-qa", "rows": [
+        {"example_index": 1, "outputs_json": '{"a": 2}', "error": "", "latency_s": 1.5,
+         "scores": [{"key": "correctness", "score": 1, "comment": ""}]},
+        {"example_index": 0, "outputs_json": '{"a": 9}', "error": "", "latency_s": 2.0,
+         "scores": [{"key": "correctness", "score": 0, "comment": "wrong"}]}]}
+    ex.create_experiment("ct1-baseline", exp, "ct1-qa")
+    ids = ex.manifest.find("dataset", "ct1-qa")["example_ids"]
+    assert [r["reference_example_id"] for r in ex.client.runs] == [ids[1], ids[0]]
+    assert ex.client.runs[0]["inputs"] == {"q": "b"}
+    assert ex.client.objs["project"]["ct1-baseline"].reference_dataset_id == ex.manifest.find("dataset", "ct1-qa")["id"]
+    assert [f["score"] for f in ex.client.feedback] == [1, 0]
+    outcomes = ex.reset()
+    assert [o["name"] for o in outcomes] == ["ct1-baseline", "ct1-qa"] and all(o["outcome"] == "deleted" for o in outcomes)
+
+
+def test_experiment_needs_its_dataset_seeded_first(ex):
+    with pytest.raises(HarnessError, match="isn't seeded"):
+        ex.create_experiment("ct1-baseline", {"description": "", "dataset": "<run_id>-qa", "rows": []}, "ct1-qa")

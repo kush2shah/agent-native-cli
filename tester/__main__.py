@@ -152,6 +152,15 @@ def run_opts(args: argparse.Namespace, cfg) -> dict:
             "tasks": [t.strip() for t in args.tasks.split(",")] if args.tasks else None}
 
 
+def prior_runs(args: argparse.Namespace, cfg, exclude: str) -> list[str]:
+    """Runs the planner learns from: --learn-from, else the 3 most recent runs with results."""
+    if getattr(args, "learn_from", None) is not None:
+        return [r.strip() for r in args.learn_from.split(",") if r.strip()]
+    found = sorted((p.stat().st_mtime, p.parent.name) for p in cfg.runs_dir.glob("*/results.jsonl")
+                   if p.parent.name != exclude)
+    return [name for _, name in found[-3:]]
+
+
 def plan_header(text: str) -> dict:
     meta = {}
     for line in text.splitlines():
@@ -221,6 +230,9 @@ def drive(args: argparse.Namespace, plan_only: bool) -> int:
                     return 1
                 print(f"run {run_id}: plan {args.plan}")
             else:
+                start["prior_runs"] = prior_runs(args, cfg, exclude=run_id)
+                if start["prior_runs"]:
+                    print(f"learning from earlier runs: {', '.join(start['prior_runs'])}")
                 inv_path = Path(args.inventory) if args.inventory else latest_inventory(cfg.runs_dir)
                 if not inv_path or not inv_path.exists():
                     print("no inventory found; run `python -m tester discover` first", file=sys.stderr)
@@ -511,6 +523,7 @@ def main(argv: list[str] | None = None) -> int:
     pl.add_argument("--inventory", help="inventory.json to plan against (default: newest run)")
     pl.add_argument("--snapshot", help="docs snapshot dir (default: today's)")
     pl.add_argument("--defaults", action="store_true", help="skip intake questions and use the defaults")
+    pl.add_argument("--learn-from", metavar="RUN_IDS", help="earlier runs to learn from (default: 3 most recent; '' for none)")
     pl.set_defaults(func=cmd_plan)
     rn = sub.add_parser("run", help="plan (or take an approved plan), seed, run each task per arm, reset")
     rn.add_argument("--plan", help="start from this approved plan.yaml instead of planning")
@@ -522,6 +535,7 @@ def main(argv: list[str] | None = None) -> int:
     rn.add_argument("--inventory", help="inventory.json (default: the plan's, else newest run)")
     rn.add_argument("--snapshot", help="docs snapshot dir (default: the plan's, else today's)")
     rn.add_argument("--defaults", action="store_true", help="skip intake questions and use the defaults")
+    rn.add_argument("--learn-from", metavar="RUN_IDS", help="earlier runs to learn from (default: 3 most recent; '' for none)")
     rn.set_defaults(func=cmd_run)
     rs = sub.add_parser("reset", help="delete a run's manifest entries and verify by listing")
     rs.add_argument("run_id")
