@@ -405,6 +405,36 @@ def cmd_reset(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    import json
+    from pathlib import Path
+
+    from tester.inventory import Inventory
+    from tester.report import build_report
+
+    cfg = load_config()
+    dirs = [cfg.runs_dir / rid for rid in args.run_ids]
+    missing = [str(d) for d in dirs if not (d / "results.jsonl").exists()]
+    if missing:
+        print(f"no results.jsonl in: {', '.join(missing)}", file=sys.stderr)
+        return 1
+    inv_path = Path(args.inventory) if args.inventory else latest_inventory(cfg.runs_dir)
+    if not inv_path:
+        print("no inventory found; run `discover` first", file=sys.stderr)
+        return 1
+    model = None if args.no_llm else make_model(cfg)
+    md, data = build_report(dirs, Inventory.load(inv_path), model)
+    if len(dirs) == 1:
+        out = dirs[0] / "report.md"
+    else:
+        out = cfg.runs_dir / "_reports" / ("+".join(args.run_ids) + ".md")
+        out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(md)
+    out.with_suffix(".json").write_text(json.dumps(data, indent=2))
+    print(f"wrote {out} (inventory: {inv_path})")
+    return 0
+
+
 def make_model(cfg):
     from langchain.chat_models import init_chat_model
 
@@ -558,6 +588,12 @@ def main(argv: list[str] | None = None) -> int:
     rs.add_argument("run_id")
     rs.add_argument("--yes", action="store_true", help="don't ask for confirmation")
     rs.set_defaults(func=cmd_reset)
+
+    rp = sub.add_parser("report", help="write report.md from one or more finished runs")
+    rp.add_argument("run_ids", nargs="+", metavar="RUN_ID")
+    rp.add_argument("--inventory", help="inventory.json (default: newest run)")
+    rp.add_argument("--no-llm", action="store_true", help="skip the suggested-changes model call")
+    rp.set_defaults(func=cmd_report)
 
     args = parser.parse_args(argv)
     try:

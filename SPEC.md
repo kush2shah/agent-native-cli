@@ -19,6 +19,21 @@ This is a prototype, not a product. Favor simple and readable over general. Buil
 - Model comparisons (knowledge comparisons are in scope; see Docs)
 - Handling CLI version changes
 
+## Tenets of an agent-native CLI
+
+What the tester measures against. The report tags each finding with one (ids in `tester/report.py`).
+
+1. **Learnable from `--help` alone** (`learnable`): an agent with no prior knowledge finds the right command without docs.
+2. **Wrong input fails loudly** (`fails_loudly`): an invented command or flag exits non-zero, with an error on stderr that says what's wrong and how to fix it.
+3. **Help matches behavior** (`help_is_true`): usage lines run as written, stated defaults are real, limits are documented.
+4. **Output is machine-readable and bounded** (`parseable_output`): JSON output is valid JSON, and lists can be limited.
+5. **Consistent conventions** (`consistent`): what an agent learns on one command transfers to the next.
+6. **Addressable by a name the agent can type** (`addressable`): identifiers it sees can be passed back as-is.
+7. **Commands follow the product's concepts** (`concepts_map`): a request in product terms leads to the right commands.
+8. **Permission errors are recognizable** (`clear_permissions`): "you can't" is distinguishable from "you did it wrong".
+
+Not yet measured: non-interactive by default, stable exit codes beyond the help case, pagination signals, idempotent creates, and destructive commands requiring explicit confirmation (the trap tasks measure the agent's side of that, not the CLI's).
+
 ## Hard safety rules
 
 These are enforced in code, never left to the model's judgment.
@@ -306,11 +321,17 @@ These shape the parser and graders, and several are report findings already:
 
 ## Report (`report.md`)
 
-1. **Not tested:** blind spots, plus inventory commands never exercised, with reasons
-2. **Scorecard:** per task and arm, passes out of `REPEATS`, plus soft metrics
-3. **Arm comparison:** per task, which arms passed, and what that says about the CLI vs the docs
-4. **Findings:** each failure pattern mapped to a concrete CLI or docs change it suggests, including docs check results
-5. **Caveat:** generator and tester share a model; flag if results look suspiciously clean
+`python -m tester report RUN_ID [RUN_ID ...] [--no-llm]` writes `runs/<id>/report.md` (or `runs/_reports/<a>+<b>.md` for several runs) plus a `.json` with the same data. Everything but section 3 is computed from `results.jsonl`, `commands.jsonl`, `reset.json`, and the inventory.
+
+Every logged call gets a kind: `help`, `ok`, `cli_error`, `permission` (HTTP 401/403 or permission wording; a "401 days" in a message doesn't count), `invented_subcommand`, `policy` (a write or destructive command refused: agent behavior), `harness` (the sandbox's argument checks: not the CLI's fault), `budget`.
+
+1. **Not tested:** blind spots (probe-denied plus runtime permission errors), coverage of read and write commands, and the read commands never exercised
+2. **Friction:** failed calls (`cli_error`, `invented_subcommand`) grouped by command path and a normalized error signature: run-prefixed names become `<name>`, IDs `<id>`, URLs `<url>`, long numbers and parenthesized values `…`, and an API error is reduced to `status: detail`. Errors parsed from stdout when stderr holds only the CLI's "report CLI friction" tip, and that's flagged. Per group: calls, workers, and how often the same command later worked. Also successful calls whose output exceeded the worker's 40,000-char window.
+3. **Suggested changes:** one structured model call (`prompts/report.md`) over the groups, with each command's help summary, usage, and flags. Each finding has a problem, a change, an owner (`cli`, `api`, `docs`, `harness`), a tenet, and a `fix_id`; findings sharing a `fix_id` merge into one entry, ranked by failed calls.
+4. **Behavior on risky requests:** each trap run, what it tried (from the log), and the start of its answer
+5. **Scorecard:** per run, task and arm: verdict, calls, help, failed calls, and **excess** calls over the fewest any passing worker needed for that task (weak with one repeat per arm)
+6. **Arms:** pass rate, mean calls and help, docs calls, cost; flags a docs arm that never searched, and tasks where arms disagreed
+7. **Caveats:** sandbox denials, budget and turn stops, unclean resets, shared generator/worker model
 
 ## Milestones
 
@@ -334,6 +355,7 @@ Each milestone ends with something runnable. Stop after each one for review.
 - Done when: a full run leaves the workspace exactly as it started, verified by listing.
 
 **M4: Fan out + grade + report**
+- Done so far: `report` (sections above) over existing run folders.
 - Replace the sequential loop with Send; add parallel graders, the report (with the arm comparison), and dispute → regrade.
 - Done when: `report.md` shows blind spots first and repeats ran concurrently (visible as shared step numbers in traces).
 
@@ -354,7 +376,7 @@ Each milestone ends with something runnable. Stop after each one for review.
 
 ```
 tester/
-  __main__.py        # CLI entry: discover | docs | config | plan | run | reset
+  __main__.py        # CLI entry: discover | docs | config | plan | run | reset | report
   config.py          # .env loading, env mapping
   run_cli.py         # allowlisted subprocess tool + policy
   classify.py        # hard denylist, verb rules, overrides, LLM suggestions
@@ -369,8 +391,8 @@ tester/
   budget.py          # process-level cost meter (M3)
   graders.py         # (M4)
   manifest.py        # (M3)
-  report.py          # (M4)
-  prompts/           # classifier.md, generator.md, tester.md
+  report.py          # report.md from run folders (M4)
+  prompts/           # classifier.md, generator.md, tester.md, report.md
 classifications.yaml # human-reviewed overrides
 tests/
   fake_cli/          # stub binary + help tree
