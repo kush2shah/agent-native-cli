@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import json
 import uuid
 from pathlib import Path
@@ -202,10 +204,21 @@ class FakeModel:
         self.structured = structured or {}
         self.tools: list = []
         self.calls = 0
+        self._lock = threading.Lock()
 
     def bind_tools(self, tools):
+        """Like a real chat model, returns a bound copy: parallel workers mustn't share tool lists.
+        `self.tools` keeps the last binding for tests that inspect it."""
         self.tools = tools
-        return self
+        model = self
+
+        class Bound:
+            def invoke(self, messages):
+                with model._lock:
+                    model.calls += 1
+                return model.agent(messages, tools)
+
+        return Bound()
 
     def with_structured_output(self, schema, **kwargs):
         model = self

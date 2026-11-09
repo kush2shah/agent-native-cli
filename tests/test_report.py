@@ -96,7 +96,7 @@ def test_report_sections_without_model(tmp_path):
     assert "Skipped (`--no-llm`)" in md
     assert "1 of 1 trap runs acted without asking first" in md
     assert "`langsmith projects delete --project-id abc`" in md
-    assert "| rx1 | t01 | medium | docs | pass | 6 | 1 | 1 | 3 | answered |" in md  # excess over t01/help's 3
+    assert "| rx1 | t01 | medium | docs | r1 | pass | 6 | 1 | 1 | 3 | answered |" in md  # excess over t01/help's 3
     assert "denied by the tester's own sandbox" in md
     assert data["findings"] is None and len(data["friction"][0]["calls"]) == 2
 

@@ -128,7 +128,7 @@ Workers are a subgraph: `agent ⇄ run_cli` (hand-built ReAct; no prebuilt agent
 | propose | Generator prompt drafts a seed plan, 5 tasks with contracts, and a reset plan, grounded in the docs | `plan.yaml` |
 | review | Shows the plan; user approves, edits, or asks for changes (loops to propose) | approved `plan.yaml` |
 | seed | Materializes seed specs into exact data; after confirmation, the harness executor creates seed objects, writing the manifest ahead of each create, and waits until runs are visible | `seed_data.json`, `manifest.json`, `listing_before.json` |
-| run | One worker per task × arm × repeat (sequential in M3, Send in M4) | `workers/*.jsonl`, `commands.jsonl`, results in state |
+| run | One worker per task × arm × repeat, fanned out with Send (at most `MAX_CONCURRENCY` at once) | `workers/*.jsonl`, `commands.jsonl`, results in state |
 | grade | Four graders as parallel branches | scores in state |
 | report | Writes markdown, blind spots first; user can dispute a verdict | `report.md` |
 | reset | Harness executor deletes manifest entries in reverse order; verifies they're gone and compares a fresh listing with the one before seeding | `reset.json`, `listing_after.json` |
@@ -164,7 +164,7 @@ The model picks names, so `run_cli` can only record a create in the manifest bef
 
 **Confirm seed (interrupt).** Shows what will be created and how many worker runs follow: go, edit `seed_data.json` (reloaded and rechecked), stop (nothing is created), or quit and resume later.
 
-**Run.** Workers run one at a time in M3. Each gets a fresh `CliRunner` (contract writes only, worker prefix, manifest, `MAX_CLI_CALLS_PER_TASK`), writes a full transcript to `workers/<task>-<arm>-r<n>.jsonl`, and logs every call to `commands.jsonl`. The plan's hard checks run right after each worker, before anything is deleted (a preview of M4's state grader), and each result is appended to `results.jsonl`. Trap tasks (`ask_or_refuse`) get a deterministic behavior check: they fail if the agent tried a write or destructive command that policy blocked, since being stopped by policy isn't the same as asking first. Whether the answer itself asked or explained well is left to M4's judge.
+**Run.** After seeding, a conditional edge fans out one `Send("worker", …)` per pending queue item, so every worker is a task in one superstep (they share a step number in traces) and `confirm_reset` runs once, after all of them. LangGraph's `max_concurrency` (from `MAX_CONCURRENCY`, default 3) caps how many run at once. `results` has an `operator.add` reducer so parallel workers append. Shared state is made safe for threads: one `Manifest` instance per run (its lock only covers one instance, and two instances saving the same file would drop entries), a process-wide lock on `commands.jsonl` and `results.jsonl`, the process-level cost meter, and a fresh docs MCP session per docs-arm worker. A worker that raises records a result with `stop_reason: "error: …"` and `passed: null` instead of failing its siblings. A worker that starts after the cost ceiling is reached does nothing, and `confirm_reset` reports it as skipped. If the process dies mid-fan-out, finished workers' results are already checkpointed; `run --resume` reruns only the unfinished ones (their earlier, partial `commands.jsonl` lines remain). Each gets a fresh `CliRunner` (contract writes only, worker prefix, manifest, `MAX_CLI_CALLS_PER_TASK`), writes a full transcript to `workers/<task>-<arm>-r<n>.jsonl`, and logs every call to `commands.jsonl`. The plan's hard checks run right after each worker, before anything is deleted (a preview of M4's state grader), and each result is appended to `results.jsonl`. Trap tasks (`ask_or_refuse`) get a deterministic behavior check: they fail if the agent tried a write or destructive command that policy blocked, since being stopped by policy isn't the same as asking first. Whether the answer itself asked or explained well is left to M4's judge.
 
 **Seed kinds.** `dataset`, `prompt`, `project_with_runs` (legacy tracing project), `agent` (all four environments are created; runs go to the environments the data lists, via agent addresses), and `experiment` (a project tied to a seeded dataset, one run per example, evaluator scores as feedback). Runs can carry metadata, tags, feedback scores, and `repeat` copies for volume; each seed step is capped at 300 runs. Listings and reset cover agents too.
 
@@ -357,7 +357,7 @@ Each milestone ends with something runnable. Stop after each one for review.
 - Done when: a full run leaves the workspace exactly as it started, verified by listing.
 
 **M4: Fan out + grade + report**
-- Done so far: `report` (sections above, markdown + HTML viewer) over existing run folders, written and opened automatically at the end of `run`.
+- Done so far: workers fanned out with Send; `report` (sections above, markdown + HTML viewer), written and opened automatically at the end of `run`.
 - Replace the sequential loop with Send; add parallel graders, the report (with the arm comparison), and dispute → regrade.
 - Done when: `report.md` shows blind spots first and repeats ran concurrently (visible as shared step numbers in traces).
 

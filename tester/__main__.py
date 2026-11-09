@@ -206,7 +206,8 @@ def drive(args: argparse.Namespace, plan_only: bool) -> int:
         print(f"WARNING: {w}", file=sys.stderr)
     cmd = "plan" if plan_only else "run"
     run_id = args.resume or args.run_id or new_run_id()
-    config = {"configurable": {"thread_id": run_id}, "recursion_limit": 1000}
+    # max_concurrency caps how many workers the Send fan-out runs at once
+    config = {"configurable": {"thread_id": run_id}, "recursion_limit": 1000, "max_concurrency": cfg.max_concurrency}
     cfg.runs_dir.mkdir(parents=True, exist_ok=True)
 
     with SqliteSaver.from_conn_string(str(cfg.runs_dir / "checkpoints.sqlite")) as saver:
@@ -220,6 +221,11 @@ def drive(args: argparse.Namespace, plan_only: bool) -> int:
             if not plan_only and state.values.get("plan_only") and state.values.get("approved") and not state.next:
                 # A plan approved with `plan`: carry on into seeding.
                 graph.update_state(config, {"plan_only": False, "run_opts": run_opts(args, cfg)}, as_node="review")
+                graph.invoke(None, config)
+            elif state.next and not state.interrupts:
+                # Crashed mid-step (e.g. during the worker fan-out): finished workers' results are
+                # checkpointed, so this reruns only the ones that didn't finish.
+                print(f"continuing from {', '.join(sorted(set(state.next)))} ...", flush=True)
                 graph.invoke(None, config)
         else:
             start = {"run_id": run_id, "plan_only": plan_only}

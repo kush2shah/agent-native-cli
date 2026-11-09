@@ -32,6 +32,7 @@ DENIED_FLAGS = {"--workspace", "--profile", "--api-url", "--api-key", "--base-ur
 HELP_FLAGS = {"-h", "--help"}
 _WORD = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 LOG_HEAD_CHARS = 2000
+_LOG_LOCK = threading.Lock()
 
 
 @dataclass
@@ -293,7 +294,7 @@ class CliRunner:
         if not self.log_path:
             return
         record = {"ts": time.time(), "label": self.label, **result.log_record()}
-        with self._lock:
+        with _LOG_LOCK:  # process-wide: parallel workers' runners append to the same commands.jsonl
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             with self.log_path.open("a") as f:
                 f.write(json.dumps(record) + "\n")

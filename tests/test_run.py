@@ -171,3 +171,95 @@ def test_seeding_can_be_retried_after_a_fix(run_cfg, start, tmp_path):
     graph.invoke(Command(resume={"action": "retry_seed"}), CFG)
     done = interrupt(graph)
     assert done["seed_error"] == "" and len(done["results"]) == 1 and done["results"][0]["passed"]
+
+
+def test_workers_run_in_parallel_in_one_superstep(run_cfg, start, tmp_path):
+    import threading
+    import time
+
+    lock, active, peak = threading.Lock(), [0], [0]
+
+    def slow(messages, tools):
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        time.sleep(0.15)
+        with lock:
+            active[0] -= 1
+        return ai("It asks about France.")
+
+    graph, _ = make_graph(run_cfg, tmp_path, model=FakeModel(slow, SEED))
+    cfg = {**CFG, "max_concurrency": 2}
+    graph.invoke({**start, "run_opts": {"arms": ["help", "docs"], "repeats": 2, "tasks": ["t01"]}}, cfg)
+    graph.invoke(Command(resume={"action": "go"}), cfg)
+    done = interrupt(graph)
+    assert len(done["results"]) == 4 and all(r["passed"] for r in done["results"])
+    assert peak[0] == 2  # parallel, and capped by max_concurrency
+    # map-reduce: all four workers were tasks of a single superstep
+    supersteps = [[t.name for t in snap.tasks] for snap in graph.get_state_history(CFG)]
+    assert ["worker"] * 4 in supersteps
+
+
+def test_a_crashing_worker_does_not_sink_the_others(run_cfg, start, tmp_path):
+    def flaky(messages, tools):
+        if len(tools) > 1:  # the docs arm has the docs tools too
+            raise RuntimeError("model fell over")
+        return ai("It asks about France.")
+
+    graph, _ = make_graph(run_cfg, tmp_path, model=FakeModel(flaky, SEED))
+    graph.invoke({**start, "run_opts": {"arms": ["help", "docs"], "tasks": ["t01"]}}, CFG)
+    graph.invoke(Command(resume={"action": "go"}), CFG)
+    results = {r["arm"]: r for r in interrupt(graph)["results"]}
+    assert results["help"]["passed"] is True
+    assert results["docs"]["passed"] is None and results["docs"]["stop_reason"].startswith("error: RuntimeError")
+    lines = (run_cfg.runs_dir / "ct1" / "results.jsonl").read_text().splitlines()
+    assert len(lines) == 2
+
+
+def test_cost_ceiling_skips_workers_that_have_not_started(run_cfg, start, tmp_path):
+    client = FakeClient(cli_state=tmp_path / "cli_state.json")
+    holder = {}
+
+    def spend_it_all(messages, tools):
+        holder["deps"].meter.spent = 10_000  # the first worker blows the ceiling
+        return ai("It asks about France.")
+
+    deps = Deps(cfg=run_cfg, model=FakeModel(spend_it_all, SEED), make_client=lambda cfg: client,
+                make_docs=lambda: DocsMCP(post=FakeDocsServer()), log=lambda *a: None)
+    holder["deps"] = deps
+    graph = build_graph(deps, checkpointer=InMemorySaver())
+    graph.invoke({**start, "run_opts": {"arms": ["help"], "repeats": 3, "tasks": ["t01"]}}, CFG)
+    graph.invoke(Command(resume={"action": "go"}), {**CFG, "max_concurrency": 1})
+    done = interrupt(graph)
+    assert len(done["results"]) == 1 and done["skipped"] == 2 and done["cost_exhausted"]
+
+
+class Killed(BaseException):
+    """Stands in for the process dying: not an Exception, so the worker's own handler lets it through."""
+
+
+def test_resume_after_a_crash_reruns_only_unfinished_workers(run_cfg, start, tmp_path):
+    import time
+
+    calls = {"help": 0, "docs": 0}
+    crash = {"on": True}
+
+    def agent_(messages, tools):
+        arm = "docs" if len(tools) > 1 else "help"
+        calls[arm] += 1
+        if arm == "docs" and crash["on"]:
+            time.sleep(0.1)  # let the help worker finish first
+            raise Killed()
+        return ai("It asks about France.")
+
+    graph, _ = make_graph(run_cfg, tmp_path, model=FakeModel(agent_, SEED))
+    graph.invoke({**start, "run_opts": {"arms": ["help", "docs"], "tasks": ["t01"]}}, CFG)
+    with pytest.raises(Killed):
+        graph.invoke(Command(resume={"action": "go"}), CFG)
+    assert graph.get_state(CFG).next == ("worker",) and not graph.get_state(CFG).interrupts
+
+    crash["on"] = False
+    graph.invoke(None, CFG)  # what `run --resume` does
+    done = interrupt(graph)
+    assert sorted(r["arm"] for r in done["results"]) == ["docs", "help"]
+    assert calls["help"] == 1  # the finished worker wasn't rerun

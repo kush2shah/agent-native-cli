@@ -239,7 +239,7 @@ function drawScore() {
   for (const r of D.scorecard) {
     if ((fRun.value && r.run !== fRun.value) || (fArm.value && r.arm !== fArm.value) || (fFail.checked && r.passed !== false && !r.failed)) continue;
     sBody.append(h("tr", { class: "click", title: r.prompt, onclick: () => openWorker(r.worker) },
-      h("td", {}, r.run), h("td", {}, r.task), h("td", {}, r.tier), h("td", {}, r.arm), h("td", {}, verdictChip(r.passed)),
+      h("td", {}, r.run), h("td", {}, r.task), h("td", {}, r.tier), h("td", {}, r.arm), h("td", {}, `r${r.repeat}`), h("td", {}, verdictChip(r.passed)),
       h("td", { class: "num" }, r.calls), h("td", { class: "num" }, r.help), h("td", { class: "num" }, r.failed || ""),
       h("td", { class: "num" }, r.excess == null ? "–" : r.excess), h("td", {}, r.stop), h("td", { class: "num" }, `$${r.cost.toFixed(3)}`)));
   }
@@ -249,9 +249,9 @@ drawScore();
 const failedChecks = D.scorecard.flatMap((r) => r.checks.filter((c) => !c.passed).map((c) => ({ r, c })));
 section("scorecard", "Scorecard", `${D.scorecard.length} worker runs`,
   h("div", { class: "filters" }, fRun, fArm, h("label", { class: "tog" }, fFail, "failures or failed calls only")),
-  h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Run", "Task", "Tier", "Arm", "Verdict"].map((t) => h("th", {}, t)),
+  h("div", { class: "tablewrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["Run", "Task", "Tier", "Arm", "Rep", "Verdict"].map((t) => h("th", {}, t)),
     ["Calls", "Help", "Failed", "Excess"].map((t) => h("th", { class: "num" }, t)), h("th", {}, "Stop"), h("th", { class: "num" }, "Cost"))), sBody)),
-  h("p", { class: "note" }, "Excess is calls beyond the fewest any passing worker needed for that task (weak with one repeat per arm). Click a row for the transcript."),
+  h("p", { class: "note" }, `Excess is calls beyond the fewest any passing worker needed for that task. ${D.baseline_note} Click a row for the transcript.`),
   failedChecks.length ? h("ul", { class: "plain note" }, failedChecks.map(({ r, c }) => h("li", {}, workerLink(r.worker, `${r.run} ${r.task}/${r.arm}`), ` failed check: ${c.describe}`))) : null);
 
 // coverage

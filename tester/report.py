@@ -323,6 +323,19 @@ def transcript_events(path: Path) -> list[dict]:
     return events
 
 
+def baseline_note(results: list[tuple[Run, dict]]) -> str:
+    per_task = defaultdict(int)
+    for run, r in results:
+        if r.get("expected") == "complete":
+            per_task[(run.run_id, r["task_id"])] += 1
+    if not per_task:
+        return ""
+    lo, hi = min(per_task.values()), max(per_task.values())
+    spread = f"{lo}" if lo == hi else f"{lo}–{hi}"
+    weak = " Weak with this few; run more repeats for a firmer baseline." if hi < 4 else ""
+    return f"Each task's baseline comes from {spread} worker runs across arms and repeats.{weak}"
+
+
 def compute(runs: list[Run], inv: Inventory, groups: list[Group], big: list[dict],
             findings: list[Finding] | None, transcripts: bool = True) -> dict:
     results = [(run, r) for run in runs for r in run.results]
@@ -434,6 +447,7 @@ def compute(runs: list[Run], inv: Inventory, groups: list[Group], big: list[dict
         "caveats": caveats,
         "tenets": TENETS,
         "max_tool_output": MAX_TOOL_OUTPUT,
+        "baseline_note": baseline_note(results),
     }
     if transcripts:
         data["transcripts"] = {
@@ -548,14 +562,14 @@ def render_md(d: dict) -> str:
         lines += ["No trap tasks in these runs.", ""]
 
     lines += ["## 5. Scorecard", "",
-              "Calls are CLI calls; **excess** is calls beyond the fewest any passing worker needed for that task "
-              "(a weak baseline with one repeat per arm).", "",
-              "| Run | Task | Tier | Arm | Verdict | Calls | Help | Failed | Excess | Stop |",
-              "|---|---|---|---|---|---|---|---|---|---|"]
+              f"Calls are CLI calls; **excess** is calls beyond the fewest any passing worker needed for that task. "
+              f"{d['baseline_note']}", "",
+              "| Run | Task | Tier | Arm | Rep | Verdict | Calls | Help | Failed | Excess | Stop |",
+              "|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in d["scorecard"]:
         verdict = {True: "pass", False: "**FAIL**", None: "unscored"}[r["passed"]]
         excess = "–" if r["excess"] is None else r["excess"]
-        lines.append(f"| {r['run']} | {r['task']} | {r['tier']} | {r['arm']} | {verdict} | {r['calls']} | "
+        lines.append(f"| {r['run']} | {r['task']} | {r['tier']} | {r['arm']} | r{r['repeat']} | {verdict} | {r['calls']} | "
                      f"{r['help']} | {r['failed']} | {excess} | {r['stop']} |")
     lines.append("")
     for r in d["scorecard"]:

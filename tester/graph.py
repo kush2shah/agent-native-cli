@@ -9,8 +9,8 @@
        ▼
     confirm_seed (interrupt) ─stop→ END        (nothing has been created yet)
        ▼ go
-    seed → run_next ⟲ (one worker per task × arm × repeat, sequential in M3)
-       ▼
+    seed ─Send─▶ worker × N (one per task × arm × repeat, in parallel, at most MAX_CONCURRENCY at once)
+       ▼ (all workers done: they share one superstep)
     confirm_reset (interrupt) ─keep→ END
        ▼ reset
     reset → END
@@ -22,14 +22,16 @@ happens before `interrupt()` in them.
 from __future__ import annotations
 
 import json
+import operator
 import re
+import threading
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import interrupt
+from langgraph.types import Send, interrupt
 
 from tester.budget import CostMeter
 from tester.classify import DESTRUCTIVE, UNKNOWN
@@ -97,8 +99,18 @@ class PlanState(TypedDict, total=False):
     queue: list[dict]  # {"task_id", "arm", "repeat"}, in run order
     root_help: str
     seed_error: str
-    results: list[dict]  # one per finished worker run
+    results: Annotated[list[dict], operator.add]  # one per finished worker run; parallel workers append
     reset_result: dict
+
+
+class WorkerTask(TypedDict):
+    """What `Send` hands one worker: its queue item plus the run context it needs."""
+    run_id: str
+    plan: dict
+    inventory_path: str
+    root_help: str
+    item: dict  # {"task_id", "arm", "repeat"}
+    total: int
 
 
 @dataclass
@@ -110,21 +122,32 @@ class Deps:
     log: Any = print
     meter: CostMeter | None = None
     _client: Any = field(default=None, repr=False)
-    _docs: Any = field(default=None, repr=False)
+    _manifests: dict = field(default_factory=dict, repr=False)
+    _lock: Any = field(default_factory=threading.Lock, repr=False)
+    _started: int = 0
 
     def __post_init__(self):
         if self.meter is None:
             self.meter = CostMeter(self.cfg.cost_ceiling_usd, self.cfg.model)
 
     def client(self):
-        if self._client is None:
-            self._client = (self.make_client or target_client)(self.cfg)
-        return self._client
+        with self._lock:
+            if self._client is None:
+                self._client = (self.make_client or target_client)(self.cfg)
+            return self._client
 
-    def docs(self):
-        if self._docs is None:
-            self._docs = self.make_docs()
-        return self._docs
+    def manifest(self, path: Path) -> Manifest:
+        """One Manifest per run, shared by parallel workers: its lock only protects one instance,
+        and two instances saving the same file would drop each other's entries."""
+        with self._lock:
+            if path not in self._manifests:
+                self._manifests[path] = Manifest(path)
+            return self._manifests[path]
+
+    def next_worker_number(self) -> int:
+        with self._lock:
+            self._started += 1
+            return self._started
 
 
 @lru_cache(maxsize=4)
@@ -303,7 +326,7 @@ def build_graph(deps: Deps, checkpointer=None):
     # --- M3: seed, run, reset ----------------------------------------------------
 
     def executor(state: PlanState) -> HarnessExecutor:
-        return HarnessExecutor(deps.client(), state["run_id"], Manifest(run_dir(deps, state) / "manifest.json"))
+        return HarnessExecutor(deps.client(), state["run_id"], deps.manifest(run_dir(deps, state) / "manifest.json"))
 
     def seeded_names(state: PlanState) -> set[str]:
         return {s["name"] for s in state["plan"].get("seed", [])}
@@ -356,56 +379,62 @@ def build_graph(deps: Deps, checkpointer=None):
         inv = Inventory.load(Path(state["inventory_path"]))
         with CliRunner(deps.cfg, inventory=inv) as r:
             root_help = r.run(["--help"]).stdout
-        return {"seed_error": "", "root_help": root_help, "results": state.get("results", [])}
+        # survives a resume: what finished workers already spent counts against the ceiling
+        deps.meter.spent = max(deps.meter.spent, sum(r.get("cost_usd", 0) for r in state.get("results", [])))
+        return {"seed_error": "", "root_help": root_help}
 
-    def after_seed(state: PlanState) -> str:
-        return "confirm_reset" if state.get("seed_error") else "run_next"
+    def dispatch(state: PlanState):
+        """Fan out one worker per pending queue item (map step of map-reduce)."""
+        items = pending(state)
+        if state.get("seed_error") or not items or deps.meter.exhausted:
+            return "confirm_reset"
+        ctx = {k: state[k] for k in ("run_id", "plan", "inventory_path", "root_help")}
+        return [Send("worker", {**ctx, "item": q, "total": len(state["queue"])}) for q in items]
 
     def pending(state: PlanState) -> list[dict]:
         done = {(r["task_id"], r["arm"], r["repeat"]) for r in state.get("results", [])}
         return [q for q in state["queue"] if (q["task_id"], q["arm"], q["repeat"]) not in done]
 
-    def run_next(state: PlanState) -> PlanState:
-        results = state.get("results", [])
-        deps.meter.spent = max(deps.meter.spent, sum(r.get("cost_usd", 0) for r in results))  # survives a resume
-        item = pending(state)[0]
-        task = next(t for t in state["plan"]["tasks"] if t["id"] == item["task_id"])
-        rid, seeded = state["run_id"], seeded_names(state)
+    def worker(task: WorkerTask) -> PlanState:
+        item, rid = task["item"], task["run_id"]
+        if deps.meter.exhausted:  # queued behind others while the ceiling was reached
+            return {}
+        plan_task = next(t for t in task["plan"]["tasks"] if t["id"] == item["task_id"])
+        seeded = {s["name"] for s in task["plan"].get("seed", [])}
         wprefix = worker_prefix(rid, item["task_id"], item["arm"], item["repeat"])
-        prompt = bind(task["prompt"], rid, seeded, wprefix)
+        prompt = bind(plan_task["prompt"], rid, seeded, wprefix)
         label = f"{item['task_id']}/{item['arm']}/r{item['repeat']}"
-        rdir = run_dir(deps, state)
+        rdir = deps.cfg.runs_dir / rid
         transcript = rdir / "workers" / f"{item['task_id']}-{item['arm']}-r{item['repeat']}.jsonl"
         transcript.unlink(missing_ok=True)  # a resumed worker starts over
-        ex = executor(state)
-        inv = Inventory.load(Path(state["inventory_path"]))
-        docs_text = deps.cfg.docs_path.read_text() if deps.cfg.docs_path and deps.cfg.docs_path.exists() else None
-        deps.log(f"  [{len(results) + 1}/{len(state['queue'])}] {label}: {prompt[:90]}")
-        with CliRunner(deps.cfg, inventory=inv, allowed_writes=tuple(task.get("allowed_writes", [])),
-                       log_path=rdir / "commands.jsonl", max_calls=deps.cfg.max_cli_calls_per_task, label=label,
-                       name_prefix=wprefix, manifest=ex.manifest, lookup_id=ex.lookup_id) as runner:
-            env = WorkerEnv(runner=runner, model=deps.model, meter=deps.meter, transcript=transcript,
-                            docs=deps.docs() if item["arm"] == "docs" else None)
-            summary = run_worker(env, system_prompt(state["root_help"], item["arm"], docs_text), prompt)
-        checks = run_checks(task, summary, ex, rid, seeded, wprefix)
-        passed = all(c["passed"] for c in checks) if checks else None
-        result = {**item, "tier": task["tier"], "expected": task["expected"], "prompt": prompt, **summary,
+        deps.log(f"  [{deps.next_worker_number()}/{task['total']}] {label}: {prompt[:90]}")
+        ex = HarnessExecutor(deps.client(), rid, deps.manifest(rdir / "manifest.json"))
+        try:
+            inv = Inventory.load(Path(task["inventory_path"]))
+            docs_text = deps.cfg.docs_path.read_text() if deps.cfg.docs_path and deps.cfg.docs_path.exists() else None
+            with CliRunner(deps.cfg, inventory=inv, allowed_writes=tuple(plan_task.get("allowed_writes", [])),
+                           log_path=rdir / "commands.jsonl", max_calls=deps.cfg.max_cli_calls_per_task, label=label,
+                           name_prefix=wprefix, manifest=ex.manifest, lookup_id=ex.lookup_id) as runner:
+                env = WorkerEnv(runner=runner, model=deps.model, meter=deps.meter, transcript=transcript,
+                                docs=deps.make_docs() if item["arm"] == "docs" else None)  # own MCP session each
+                summary = run_worker(env, system_prompt(task["root_help"], item["arm"], docs_text), prompt)
+            checks = run_checks(plan_task, summary, ex, rid, seeded, wprefix)
+            passed = all(c["passed"] for c in checks) if checks else None
+        except Exception as e:  # one broken worker shouldn't sink the superstep and its siblings
+            deps.log(f"      {label} crashed: {type(e).__name__}: {e}")
+            summary, checks, passed = crashed_summary(f"{type(e).__name__}: {e}"), [], None
+        result = {**item, "tier": plan_task["tier"], "expected": plan_task["expected"], "prompt": prompt, **summary,
                   "checks": checks, "passed": passed, "transcript": str(transcript)}
-        with (rdir / "results.jsonl").open("a") as f:
+        with _RESULTS_LOCK, (rdir / "results.jsonl").open("a") as f:
             f.write(json.dumps(result) + "\n")
         verdict = {True: "PASS", False: "FAIL", None: "needs review"}[passed]
-        deps.log(f"      {verdict}  {summary['cli_calls']} CLI calls ({summary['help_calls']} help, "
+        deps.log(f"      {label} {verdict}  {summary['cli_calls']} CLI calls ({summary['help_calls']} help, "
                  f"{len(summary['denied'])} denied), {summary['docs_calls']} docs calls, "
                  f"{summary['stop_reason']}, ${summary['cost_usd']:.3f}")
-        return {"results": [*results, result]}
-
-    def after_run(state: PlanState) -> str:
-        if pending(state) and not deps.meter.exhausted:
-            return "run_next"
-        return "confirm_reset"
+        return {"results": [result]}
 
     def confirm_reset(state: PlanState) -> PlanState:
-        manifest = Manifest(run_dir(deps, state) / "manifest.json")
+        manifest = deps.manifest(run_dir(deps, state) / "manifest.json")
         decision = interrupt({
             "type": "confirm_reset", "run_id": state["run_id"], "results": state.get("results", []),
             "skipped": len(pending(state)) if state.get("queue") else 0, "seed_error": state.get("seed_error", ""),
@@ -435,8 +464,9 @@ def build_graph(deps: Deps, checkpointer=None):
     g = StateGraph(PlanState)
     for name, fn in [("prepare", prepare), ("intake", intake), ("propose", propose), ("review", review),
                      ("materialize", materialize), ("confirm_seed", confirm_seed), ("seed", seed),
-                     ("run_next", run_next), ("confirm_reset", confirm_reset), ("reset", reset)]:
+                     ("confirm_reset", confirm_reset), ("reset", reset)]:
         g.add_node(name, fn)
+    g.add_node("worker", worker, input_schema=WorkerTask)
     g.add_edge(START, "prepare")
     g.add_conditional_edges("prepare", after_prepare, ["intake", "materialize"])
     g.add_edge("intake", "propose")
@@ -445,13 +475,22 @@ def build_graph(deps: Deps, checkpointer=None):
     g.add_edge("materialize", "confirm_seed")
     g.add_conditional_edges("confirm_seed", lambda s: {"seed": "seed", "stop": END}.get(s["next"], "confirm_seed"),
                             ["seed", "confirm_seed", END])
-    g.add_conditional_edges("seed", after_seed, ["run_next", "confirm_reset"])
-    g.add_conditional_edges("run_next", after_run, ["run_next", "confirm_reset"])
+    g.add_conditional_edges("seed", dispatch, ["worker", "confirm_reset"])
+    g.add_edge("worker", "confirm_reset")  # runs once, after every worker in the superstep finishes
     g.add_conditional_edges("confirm_reset",
                             lambda s: {"reset": "reset", "keep": END, "seed": "seed"}.get(s["next"], "confirm_reset"),
                             ["reset", "confirm_reset", "seed", END])
     g.add_edge("reset", END)
     return g.compile(checkpointer=checkpointer)
+
+
+_RESULTS_LOCK = threading.Lock()
+
+
+def crashed_summary(error: str) -> dict:
+    return {"final_answer": "", "stop_reason": f"error: {error}"[:300], "turns": 0, "cli_calls": 0, "help_calls": 0,
+            "denied": [], "blocked_actions": [], "errors": 0, "used_json_format": False, "docs_calls": 0,
+            "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
 
 
 def build_queue(plan: dict, opts: dict | None) -> list[dict]:
