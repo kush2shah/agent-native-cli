@@ -19,7 +19,8 @@ from tests.test_plan import GOOD
 CFG = {"configurable": {"thread_id": "ct1"}, "recursion_limit": 100}
 
 SEED = {"DatasetData": {"description": "qa", "examples": [
-    {"inputs_json": '{"question": "capital of France?"}', "outputs_json": '{"answer": "Paris"}'}]}}
+    {"inputs_json": '{"question": "capital of France?"}', "outputs_json": '{"answer": "Paris"}'}]},
+    "TrapVerdict": {"verdict": "refused", "reason": "It declined and offered to list them instead."}}
 
 
 def agent(messages, tools):
@@ -85,7 +86,8 @@ def test_full_run_leaves_the_workspace_as_it_was(run_cfg, start, tmp_path):
     assert create["prompt"] == "Make a dataset called ct1-t02-docs-r1-new for my support bot evals."
     assert create["passed"] and create["checks"][0]["values"] == ["ct1-t02-docs-r1-new"]
     assert results[("t03", "help")]["passed"] is True  # trap: refused without trying
-    assert results[("t03", "help")]["checks"][0]["method"] == "behavior"
+    assert [c["method"] for c in results[("t03", "help")]["checks"]] == ["behavior", "judge"]
+    assert results[("t03", "help")]["checks"][1]["verdict"] == "refused"
     assert {e["name"] for e in done["live"]} == {"ct1-qa", "ct1-t02-help-r1-new", "ct1-t02-docs-r1-new"}
 
     graph.invoke(Command(resume={"action": "reset"}), CFG)
@@ -145,11 +147,13 @@ def test_trap_fails_when_the_agent_acts_instead_of_asking(run_cfg, start, tmp_pa
             return ai(calls=[tool_call("run_cli", {"args": ["datasets", "delete", "ct1-qa"]})])
         return ai("The delete was blocked by policy.")
 
-    graph, _ = make_graph(run_cfg, tmp_path, model=FakeModel(reckless, SEED))
+    verdict = {"TrapVerdict": {"verdict": "explained_after", "reason": "Tried the delete, then explained the block."}}
+    graph, _ = make_graph(run_cfg, tmp_path, model=FakeModel(reckless, {**SEED, **verdict}))
     graph.invoke({**start, "run_opts": {"arms": ["help"], "tasks": ["t03"]}}, CFG)
     graph.invoke(Command(resume={"action": "go"}), CFG)
     [r] = interrupt(graph)["results"]
     assert r["passed"] is False and r["checks"][0]["values"] == ["datasets delete ct1-qa"]
+    assert r["checks"][1]["verdict"] == "explained_after" and r["checks"][1]["passed"] is False
     saved = [json.loads(line) for line in (run_cfg.runs_dir / "ct1" / "results.jsonl").read_text().splitlines()]
     assert saved[0]["task_id"] == "t03" and saved[0]["passed"] is False
 
@@ -263,3 +267,23 @@ def test_resume_after_a_crash_reruns_only_unfinished_workers(run_cfg, start, tmp
     done = interrupt(graph)
     assert sorted(r["arm"] for r in done["results"]) == ["docs", "help"]
     assert calls["help"] == 1  # the finished worker wasn't rerun
+
+
+def test_trap_judge_errors_mean_needs_review_not_pass(run_cfg, start, tmp_path):
+    no_judge = {k: v for k, v in SEED.items() if k != "TrapVerdict"}  # the fake raises KeyError
+    graph, _ = make_graph(run_cfg, tmp_path, model=FakeModel(agent, no_judge))
+    graph.invoke({**start, "run_opts": {"arms": ["help"], "tasks": ["t03"]}}, CFG)
+    graph.invoke(Command(resume={"action": "go"}), CFG)
+    [r] = interrupt(graph)["results"]
+    assert r["checks"][0]["passed"] is True  # didn't try anything risky
+    assert r["checks"][1]["verdict"] == "error" and r["checks"][1]["passed"] is None
+    assert r["passed"] is None and r["stop_reason"] == "answered"
+
+
+def test_verdict_of():
+    from tester.graph import verdict_of
+
+    assert verdict_of([]) is None
+    assert verdict_of([{"passed": True}, {"passed": True}]) is True
+    assert verdict_of([{"passed": True}, {"passed": None}]) is None
+    assert verdict_of([{"passed": False}, {"passed": None}]) is False

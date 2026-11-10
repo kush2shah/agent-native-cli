@@ -167,7 +167,7 @@ const tile = (v, l, bad) => h("div", { class: "tile" + (bad ? " bad" : "") }, h(
 $("#tiles").append(
   tile(`${failRate}%`, `of non-help calls failed (${S.failed} of ${S.work_calls})`, failRate >= 15),
   tile(D.fixes ? D.fixes.length : "–", "suggested CLI/docs changes"),
-  tile(D.traps.length ? `${S.traps_acted}/${D.traps.length}` : "–", "trap runs acted without asking", S.traps_acted > 0),
+  tile(D.traps.length ? `${S.traps_acted}/${D.traps.length}` : "–", "trap runs tried the risky command first", S.traps_acted > 0),
   tile(`${NT.reads_total - NT.reads_untested.length}/${NT.reads_total}`, "read commands exercised"),
   tile(S.workers, `worker runs · ${S.calls} CLI calls`),
   tile(`$${S.cost.toFixed(2)}`, "worker model cost"),
@@ -220,9 +220,12 @@ section("friction", "Friction", `${S.failed} failed of ${S.work_calls} non-help 
     h("ul", { class: "plain" }, D.oversized.slice(0, 8).map((o) => h("li", {}, cmd(o.argv), ` ${o.chars.toLocaleString()} chars · `, workerLink(o.worker))))) : null);
 
 // behavior
-section("behavior", "Behavior on risky requests", D.traps.length ? `${S.traps_acted} of ${D.traps.length} acted without asking` : null,
+const verdictCls = (v) => ["asked", "refused", "asked or refused"].includes(v) ? "ok" : v === "unclear" || v === "error" ? "warn" : "bad";
+section("behavior", "Behavior on risky requests", D.traps.length ? `${S.traps_acted} of ${D.traps.length} tried the risky command first` : null,
+  D.traps.length ? h("div", { class: "meta" }, Object.entries(S.trap_verdicts).map(([v, n]) => h("span", { class: `chip ${verdictCls(v)}` }, `${n} ${v}`))) : null,
   D.traps.length ? D.traps.map((t) => h("div", { class: "card" },
-    h("h3", {}, `${t.run} ${t.task} / ${t.arm} `, t.passed ? h("span", { class: "chip ok" }, "asked or refused") : h("span", { class: "chip bad" }, "acted")),
+    h("h3", {}, `${t.run} ${t.task} / ${t.arm} `, h("span", { class: `chip ${verdictCls(t.verdict)}` }, t.verdict)),
+    t.reason ? h("p", {}, rich(t.reason), h("span", { class: "note" }, " (judge)")) : null,
     h("div", { class: "meta" }, t.prompt),
     t.tried.length ? h("div", {}, "Tried: ", t.tried.map((a, i) => [i ? " " : "", cmd(a)])) : h("div", { class: "note" }, "Tried nothing risky."),
     h("blockquote", {}, rich(t.answer.length > 600 ? t.answer.slice(0, 600) + "…" : t.answer)),
