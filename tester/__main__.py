@@ -1,4 +1,4 @@
-"""CLI entry: python -m tester discover | docs | plan | run | reset"""
+"""CLI entry: python -m tester discover | docs | config | plan | run | reset | report | harbor-export"""
 
 from __future__ import annotations
 
@@ -535,6 +535,37 @@ def ask_review(payload: dict) -> dict | None:
             return None
 
 
+def cmd_harbor_export(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from tester.config import REPO_ROOT
+    from tester.harbor.export import ExportError, export_run
+
+    runs_dir = Path(args.runs_dir) if args.runs_dir else REPO_ROOT / "runs"
+    out = Path(args.out) if args.out else runs_dir / args.run_id / "harbor"
+    tasks = [t.strip() for t in args.tasks.split(",") if t.strip()] if args.tasks else None
+    try:
+        result = export_run(runs_dir, args.run_id, out, tasks)
+    except ExportError as e:
+        print(f"can't export: {e}", file=sys.stderr)
+        return 1
+    print(f"CLI version pinned: {result['cli_version'] or 'none recorded (not pinned)'}")
+    for path in result["exported"]:
+        print(f"  exported {path}")
+    for task_id, reason in result["skipped"]:
+        print(f"  skipped {task_id}: {reason}")
+    if not result["exported"]:
+        print("nothing to export", file=sys.stderr)
+        return 1
+    harbor = f"env -u LANGSMITH_API_KEY -u LANGSMITH_ENDPOINT -u LANGSMITH_WORKSPACE_ID harbor run -p {out}"
+    print("\nexport TARGET_API_KEY (and TARGET_ENDPOINT / TARGET_WORKSPACE_ID if set), then run as below.\n"
+          "The env -u matters: some Harbor agents forward LANGSMITH_* into the agent's container, which would\n"
+          "hand it a real key. Don't use --env-file .env for the same reason.\n"
+          f"  {harbor} -a oracle    # plumbing check first\n"
+          f"  {harbor} -a claude-code -m anthropic/claude-sonnet-5-5 -k 3 -n 3")
+    return 0
+
+
 KNOWN_VARS = [
     "TARGET_CLI_BIN", "TARGET_API_KEY", "TARGET_ENDPOINT", "TARGET_WORKSPACE_ID", "TARGET_DOCS_PATH", "DOCS_INDEX_URL",
     "LANGSMITH_API_KEY", "LANGSMITH_PROJECT", "LANGSMITH_TRACING", "MODEL", "ANTHROPIC_API_KEY",
@@ -625,6 +656,13 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--no-llm", action="store_true", help="skip the suggested-changes model call")
     rp.add_argument("--no-open", action="store_true", help="don't open report.html in a browser")
     rp.set_defaults(func=cmd_report)
+
+    hx = sub.add_parser("harbor-export", help="write a kept run's read-only tasks as Harbor task dirs (docs/harbor.md)")
+    hx.add_argument("run_id")
+    hx.add_argument("--tasks", help="only these task IDs, comma-separated")
+    hx.add_argument("--out", help="output directory (default: runs/<run_id>/harbor)")
+    hx.add_argument("--runs-dir", help=argparse.SUPPRESS)
+    hx.set_defaults(func=cmd_harbor_export)
 
     args = parser.parse_args(argv)
     try:

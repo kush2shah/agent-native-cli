@@ -361,6 +361,10 @@ Each milestone ends with something runnable. Stop after each one for review.
 - Replace the sequential loop with Send; add parallel graders, the report (with the arm comparison), and dispute → regrade.
 - Done when: `report.md` shows blind spots first and repeats ran concurrently (visible as shared step numbers in traces).
 
+### Harbor export (experiment)
+
+`python -m tester harbor-export RUN_ID` writes a kept run's read-only tasks as [Harbor](https://github.com/harbor-framework/harbor) task directories, so real coding agents (Claude Code, Codex, ...) attempt the same tasks with a shell. The target key stays in a sidecar proxy that forwards reads only. Design, safety mapping, and what's unverified: `docs/harbor.md`.
+
 ## Testing
 
 - **Fake model:** a scripted model, like the `03_react_by_hand.py` pattern, so graph logic is tested offline.
@@ -395,11 +399,13 @@ tester/
   manifest.py        # (M3)
   report.py          # report data, markdown, HTML (M4)
   report.html        # report viewer template (data embedded at write time)
+  harbor/            # export.py (plan → Harbor tasks), proxy.py (key-holding read-only API proxy), check.py (verifier)
   prompts/           # classifier.md, generator.md, tester.md, report.md, judge.md
 classifications.yaml # human-reviewed overrides
 tests/
   fake_cli/          # stub binary + help tree
 runs/                # gitignored; one folder per run
+docs/harbor.md       # running exported tasks with real agents
 ```
 
 ## Open questions
